@@ -106,6 +106,16 @@ public class KpqPlanner implements Planner {
     private Integer pendingPickupOid;
     /** oid -> attempts so far, for whichever drop/monster this bot is currently chasing (see {@link #MAX_TARGET_ATTEMPTS}). */
     private final Map<Integer, Integer> targetAttempts = new HashMap<>();
+    /**
+     * Set once the leader sees stage 1's "you gathered up N passes" success text. Needed because
+     * clearing stage 1 consumes the leader's passes (gainItem(4001008, -numpasses) server-side), so
+     * {@code have < passesNeeded} becomes true again immediately after a genuine clear - identical to
+     * the "still waiting on members" state it started in. Without this flag {@link #planStage1Leader}
+     * would fall straight back into "wait for more passes" instead of approaching the now-open portal.
+     */
+    private boolean stage1Cleared = false;
+    /** True once {@link #idleOrTryPortal} has sent this attempt's approach {@code MoveTo}; see there. */
+    private boolean portalApproached = false;
 
     public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded) {
         this.role = role;
@@ -135,6 +145,8 @@ public class KpqPlanner implements Planner {
                 targetAttempts.clear();
                 stage1State = Stage1MemberState.NEED_QUESTION;
                 stage1TargetCoupons = -1;
+                stage1Cleared = false;
+                portalApproached = false;
                 if (stageIndex == 0) {
                     phase = Phase.IN_STAGE1;
                 } else if (stageIndex >= 1 && stageIndex <= 3) {
@@ -347,6 +359,11 @@ public class KpqPlanner implements Planner {
 
     private Action planStage1Leader(WorldState world) {
         long now = System.currentTimeMillis();
+        // Once cleared, stay cleared - see stage1Cleared's javadoc for why have alone can't tell
+        // "already cleared" apart from "still waiting on the first pass".
+        if (stage1Cleared) {
+            return idleOrTryPortal(now);
+        }
         int have = world.getEtcQuantity(KpqConstants.ITEM_PASS);
         if (have < passesNeeded) {
             // See ACTION_RETRY_COOLDOWN_MS's javadoc - a failed pickup gets no rejection text to key
@@ -379,6 +396,9 @@ public class KpqPlanner implements Planner {
         if (talk != null && talk.npcId() == KpqConstants.NPC_STAGE && !talk.equals(lastHandledTalk)) {
             lastHandledTalk = talk;
             lastNpcTalkAt = now;
+            if (talk.text().contains("gathered up")) {
+                stage1Cleared = true;   // "You gathered up N passes! Congratulations..."
+            }
             return new Action.RespondToNpc(talk.msgType(), true, null);
         }
         if (now - lastNpcTalkAt < NPC_TALK_COOLDOWN_MS) {
@@ -463,12 +483,25 @@ public class KpqPlanner implements Planner {
         return KpqConstants.STAGE_PARK_SPOT[stageIndex];
     }
 
+    /**
+     * Tries the next-stage portal, approaching it first. {@code ChangeMapHandler} silently rejects a
+     * portal use more than 632px from the portal's own position ({@code distanceSq > 400000}) - found
+     * live: a whole cleared-stage party sat spamming {@code UsePortal} from wherever it happened to be
+     * (mid-farming, often 1000+px away) and never advanced, because nothing had ever moved a bot to
+     * the portal itself. Each attempt cycle is two cooldown-gated actions - move, then use - rather
+     * than one, since {@link Action.MoveTo} and {@link Action.UsePortal} both need their own tick.
+     */
     private Action idleOrTryPortal(long now) {
-        if (now - lastPortalAttemptAt >= PORTAL_RETRY_MS) {
-            lastPortalAttemptAt = now;
-            return new Action.UsePortal(KpqConstants.NEXT_STAGE_PORTAL);
+        if (now - lastPortalAttemptAt < PORTAL_RETRY_MS) {
+            return new Action.Idle();
         }
-        return new Action.Idle();
+        lastPortalAttemptAt = now;
+        if (!portalApproached) {
+            portalApproached = true;
+            return new Action.MoveTo(KpqConstants.NEXT_PORTAL_POS[stageIndex]);
+        }
+        portalApproached = false;   // re-approach next cycle too, in case some other action moved us away
+        return new Action.UsePortal(KpqConstants.NEXT_STAGE_PORTAL);
     }
 
     /**

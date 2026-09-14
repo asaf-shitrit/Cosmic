@@ -35,6 +35,21 @@ final class KpqConstants {
     /** The portal all stage 1-4 maps use to advance, once {@code NstageClear} is set. */
     static final String NEXT_STAGE_PORTAL = "next00";
 
+    /**
+     * Each stage 1-4 map's {@code next00} portal position (from the map WZ data, same source as
+     * {@link #STAGE_PARK_SPOT}). {@code ChangeMapHandler} silently rejects a portal use more than
+     * 632px away ({@code distanceSq > 400000}) from the portal's own position - found live: every
+     * bot's {@code UsePortal} attempt was being rejected this way because nothing ever moved a bot
+     * there first, so a "stage cleared" party sat spamming the portal without ever advancing. No
+     * entry for stage 5 - it has no {@code next00} (see {@link KpqPlanner}, stage 5 is out of scope).
+     */
+    static final Point[] NEXT_PORTAL_POS = {
+            new Point(716, 106),     // stage 1 -> 2
+            new Point(-218, 91),     // stage 2 -> 3
+            new Point(1331, -122),   // stage 3 -> 4
+            new Point(1331, -122),   // stage 4 -> 5
+    };
+
     /** Each stage map's {@code st00} spawn position - always outside the puzzle rectangles. */
     static final Point[] STAGE_PARK_SPOT = {
             new Point(-1075, 106),   // stage 1 (not used as a park spot - stage 1 has no rectangles)
