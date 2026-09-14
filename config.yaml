@@ -178,8 +178,8 @@ server:
     COUPON_INTERVAL: 3600000            #60 minutes, 3600000.
     UPDATE_INTERVAL: 777                #Dictates the frequency on which the "centralized server time" is updated.
 
-    ENABLE_PIC: true               #Pick true/false to enable or disable Pic. Delete character requires PIC available.
-    ENABLE_PIN: true               #Pick true/false to enable or disable Pin.
+    ENABLE_PIC: false               #Pick true/false to enable or disable Pic. Delete character requires PIC available.
+    ENABLE_PIN: false               #Pick true/false to enable or disable Pin.
 
     BYPASS_PIC_EXPIRATION: 20           #Enables PIC bypass, which will remain active for that account by that client machine for N minutes. Set 0 to disable.
     BYPASS_PIN_EXPIRATION: 15           #Enables PIN bypass, which will remain active for that account by that client machine for N minutes. Set 0 to disable.
@@ -196,8 +196,8 @@ server:
     LOGIN_ATTEMPT_DURATION: 120         #Period in seconds the login attempt remains registered on the system.
 
     #Ip Configuration
-    HOST: 127.0.0.1                 #WAN IPv4 address
-    LANHOST: 127.0.0.1              #LAN IPv4 address
+    HOST: 192.168.1.201                 #WAN IPv4 address
+    LANHOST: 192.168.1.201              #LAN IPv4 address
     LOCALHOST: 127.0.0.1            #Loopback IPv4 address
     GMSERVER: false
 
@@ -404,6 +404,10 @@ server:
     PLAYERNPC_AREA_STEPS: 4             #Max number of times gap is shortened to comport PlayerNPCs.
     PLAYERNPC_ORGANIZE_AREA: true   #Automatically rearranges PlayerNPCs on the map if there is no space set the new NPC. Current distance gap between NPCs is decreased to solve this issue.
     PLAYERNPC_AUTODEPLOY: true      #Makes PlayerNPC automatically deployed on the Hall of Fame at the instant one reaches max level. If false, eligible players must talk to 1st job instructor to deploy a NPC.
+
+    #Fake Player Configuration
+    USE_FAKE_PLAYERS: true          #Spawns wandering fake players to make the world feel populated. They are cosmetic only - they cannot be talked to, traded with, or attacked.
+    FAKE_PLAYERS_PER_TOWN: 6        #How many to scatter in each major town on startup, per channel. Set 0 to spawn none automatically (!fakeplayer <count> still works in-game).
 
     #Pet Auto-Pot Configuration
     USE_COMPULSORY_AUTOPOT: true    #Pets will consume as many potions as needed to fulfill the AUTOHP/MP ratio threshold.
