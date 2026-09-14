@@ -58,11 +58,29 @@ public class BotSession {
      * the periodic floor half of the "event-driven with a periodic fallback" cadence (see
      * {@link Planner}). This is deliberately small relative to {@link #REPLAN_FLOOR_MS}; it only
      * bounds how long {@link MapleConnection#receive()} blocks, not how often we actually replan.
+     *
+     * <p>Kept well under {@link #REPLAN_FLOOR_MS} on purpose: the floor can only fire as often as this
+     * loop actually checks it, so if this were larger than the floor, the floor would be silently
+     * capped at this value during quiet stretches - see {@link #REPLAN_FLOOR_MS}'s javadoc for why
+     * that distinction mattered live.
      */
-    private static final int READ_TICK_MS = 1_000;
+    private static final int READ_TICK_MS = 250;
 
-    /** Periodic replan floor: an idle bot (nothing notable happening) still gets a planning tick this often. */
-    private static final long REPLAN_FLOOR_MS = 7_000;
+    /**
+     * Periodic replan floor: an idle bot (nothing notable happening in {@link WorldState}, and its
+     * own last action wasn't a real one) still gets a planning tick this often. Deliberately short -
+     * a KPQ farming loop lives almost entirely in "Idle, waiting out my own action cooldown" between
+     * real actions (see {@code KpqPlanner}'s {@code ACTION_RETRY_COOLDOWN_MS}), and this floor, not
+     * that cooldown, was the actual bottleneck the first time this ran live: at the old 7s, a bot's
+     * cooldown could clear half a second in and then sit doing nothing for the rest of the 7s window
+     * unless some other bot's broadcast happened to bump {@link WorldState#getChangeVersion()} first.
+     * Measured live at roughly 1 kill/75s/bot - "the map's plenty stocked, mobs are being one-shot,
+     * yet almost nothing is happening" is exactly the signature of this floor gating everything
+     * instead of each planner's own cooldown. This value is now short enough to stay out of the way;
+     * a planner's own action-specific cooldown (KPQ's 800ms, this class's own {@link #READ_TICK_MS})
+     * is what actually paces things, which is where that job belongs - not in this shared loop.
+     */
+    private static final long REPLAN_FLOOR_MS = 300;
 
     private static final String HEX = "0123456789ABCDEF";
 
