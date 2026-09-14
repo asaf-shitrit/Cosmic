@@ -60,6 +60,7 @@ public class WorldState {
 
     /** Bumped on every spawn/despawn/move so a planner loop can cheaply notice "something changed". */
     private final AtomicInteger changeVersion = new AtomicInteger();
+    private final AtomicInteger mapChangeCount = new AtomicInteger();
     private volatile Point selfPosition;
 
     public WorldState(int selfCharId) {
@@ -366,7 +367,18 @@ public class WorldState {
         npcs.clear();
         monsters.clear();
         itemDrops.clear();
+        mapChangeCount.incrementAndGet();
         changeVersion.incrementAndGet();
+    }
+
+    /**
+     * How many times {@link #onMapChanged()} has fired, counting the very first one (this bot's
+     * initial world entry). A planner that needs to know "did I just warp somewhere new" - without
+     * decoding {@code SET_FIELD}'s map id itself, see {@link #onMapChanged()} - polls this once per
+     * tick and reacts to it changing.
+     */
+    public int getMapChangeCount() {
+        return mapChangeCount.get();
     }
 
     public int getPartyId() {
