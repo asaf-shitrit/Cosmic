@@ -6,7 +6,9 @@ import bot.WorldState;
 
 import java.awt.Point;
 import java.awt.Rectangle;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -40,6 +42,22 @@ public class KpqPlanner implements Planner {
     private static final long COMBO_CHECK_OFFSET_MS = 900;
     /** How often a bot (re)tries the next-stage portal while waiting for the stage to actually clear. */
     private static final long PORTAL_RETRY_MS = 1500;
+    /**
+     * Minimum gap between combat/loot actions (move-to-attack, attack, move-to-pickup, pickup). This
+     * is the important one: unlike every other action in this class, a failed attack or pickup gets
+     * no rejection text to react to - {@code Character#pickupItem}'s failure paths do send an
+     * {@code enableActions} reply, and that reply arriving is enough for the driver loop
+     * ({@code BotSession#runGameLoop}) to treat it as "something happened" and replan immediately
+     * (a real move/talk/action always sets {@code forceReplan}, deliberately, so a scripted sequence
+     * doesn't wait out the periodic floor between steps) - without a cooldown here, a persistently
+     * failing pickup (e.g. two bots racing the same single drop) turns into an unthrottled
+     * request/reply loop bounded only by round-trip time, not by anything this bot intends. Learned
+     * live: an early run without this cooldown produced on the order of a thousand PickupItem
+     * attempts per second per bot before it was caught and killed.
+     */
+    private static final long ACTION_RETRY_COOLDOWN_MS = 800;
+    /** After this many unsuccessful attempts on the same drop/monster, stop retrying it and move on. */
+    private static final int MAX_TARGET_ATTEMPTS = 4;
     /** Comfortably one-shots anything in this instance - see {@link Action.AttackMonster}'s javadoc. */
     private static final int ONE_SHOT_DAMAGE = 999_999;
 
@@ -68,11 +86,14 @@ public class KpqPlanner implements Planner {
     private long lastPartyActionAt = 0;
     private long lastNpcTalkAt = 0;
     private long lastPortalAttemptAt = 0;
+    private long lastFarmActionAt = 0;
     private WorldState.NpcTalk lastHandledTalk;
     private boolean setupDoneForStage = false;
     private int lastComboAttemptIndex = -1;
     private Integer pendingAttackOid;
     private Integer pendingPickupOid;
+    /** oid -> attempts so far, for whichever drop/monster this bot is currently chasing (see {@link #MAX_TARGET_ATTEMPTS}). */
+    private final Map<Integer, Integer> targetAttempts = new HashMap<>();
 
     public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded) {
         this.role = role;
@@ -99,6 +120,7 @@ public class KpqPlanner implements Planner {
                 lastHandledTalk = null;
                 pendingAttackOid = null;
                 pendingPickupOid = null;
+                targetAttempts.clear();
                 stage1State = Stage1MemberState.NEED_QUESTION;
                 stage1TargetCoupons = -1;
                 if (stageIndex == 0) {
@@ -223,36 +245,56 @@ public class KpqPlanner implements Planner {
             }
             case FARMING -> {
                 int have = world.getEtcQuantity(KpqConstants.ITEM_COUPON);
-                if (have > stage1TargetCoupons) {
-                    yield new Action.DropItem(KpqConstants.ITEM_COUPON, have - stage1TargetCoupons);
-                }
                 if (have == stage1TargetCoupons) {
                     stage1State = Stage1MemberState.SUBMITTING;
                     yield new Action.Idle();
                 }
+                // Every branch below sends a packet, so every branch is behind this one cooldown -
+                // see ACTION_RETRY_COOLDOWN_MS's javadoc for why that's load-bearing, not cosmetic.
+                if (now - lastFarmActionAt < ACTION_RETRY_COOLDOWN_MS) {
+                    yield new Action.Idle();
+                }
+                if (have > stage1TargetCoupons) {
+                    lastFarmActionAt = now;
+                    yield new Action.DropItem(KpqConstants.ITEM_COUPON, have - stage1TargetCoupons);
+                }
                 if (pendingPickupOid != null) {
                     int oid = pendingPickupOid;
                     pendingPickupOid = null;
+                    lastFarmActionAt = now;
                     yield new Action.PickupItem(oid);
                 }
                 if (pendingAttackOid != null) {
                     int oid = pendingAttackOid;
                     pendingAttackOid = null;
+                    lastFarmActionAt = now;
                     yield new Action.AttackMonster(oid, ONE_SHOT_DAMAGE);
                 }
-                Optional<WorldState.ItemDrop> drop = world.getItemDrops().stream()
-                        .filter(d -> d.itemId() == KpqConstants.ITEM_COUPON).findFirst();
+                List<WorldState.ItemDrop> drops = world.getItemDrops().stream()
+                        .filter(d -> d.itemId() == KpqConstants.ITEM_COUPON)
+                        .filter(d -> attemptsSoFar(d.objectId()) < MAX_TARGET_ATTEMPTS)
+                        .toList();
+                Optional<WorldState.ItemDrop> drop = pickSpread(drops);
                 if (drop.isPresent()) {
-                    pendingPickupOid = drop.get().objectId();
+                    int oid = drop.get().objectId();
+                    recordAttempt(oid);
+                    pendingPickupOid = oid;
+                    lastFarmActionAt = now;
                     yield new Action.MoveTo(drop.get().position());
                 }
-                Optional<WorldState.MonsterSighting> mob = world.getMonsters().stream()
-                        .filter(m -> m.monsterId() == KpqConstants.MOB_STAGE1).findFirst();
+                List<WorldState.MonsterSighting> mobs = world.getMonsters().stream()
+                        .filter(m -> m.monsterId() == KpqConstants.MOB_STAGE1)
+                        .filter(m -> attemptsSoFar(m.objectId()) < MAX_TARGET_ATTEMPTS)
+                        .toList();
+                Optional<WorldState.MonsterSighting> mob = pickSpread(mobs);
                 if (mob.isPresent()) {
-                    pendingAttackOid = mob.get().objectId();
+                    int oid = mob.get().objectId();
+                    recordAttempt(oid);
+                    pendingAttackOid = oid;
+                    lastFarmActionAt = now;
                     yield new Action.MoveTo(mob.get().position());
                 }
-                yield new Action.Idle();   // nothing alive/dropped right now - waiting on the 15s respawn
+                yield new Action.Idle();   // nothing alive/dropped/retryable right now
             }
             case SUBMITTING -> {
                 if (world.getEtcQuantity(KpqConstants.ITEM_PASS) > 0) {
@@ -276,7 +318,14 @@ public class KpqPlanner implements Planner {
                 yield new Action.TalkToNpc(npc.get().objectId());
             }
             case HANDED_OFF -> {
+                // Gated like FARMING: the drop request's own confirmation (an INVENTORY_OPERATION
+                // update) takes a round trip to arrive, so without this cooldown a burst of replans
+                // in that window would each see the pass as "still held" and resend the drop.
                 if (world.getEtcQuantity(KpqConstants.ITEM_PASS) > 0) {
+                    if (now - lastFarmActionAt < ACTION_RETRY_COOLDOWN_MS) {
+                        yield new Action.Idle();
+                    }
+                    lastFarmActionAt = now;
                     yield new Action.DropItem(KpqConstants.ITEM_PASS, 1);
                 }
                 yield idleOrTryPortal(now);
@@ -288,15 +337,27 @@ public class KpqPlanner implements Planner {
         long now = System.currentTimeMillis();
         int have = world.getEtcQuantity(KpqConstants.ITEM_PASS);
         if (have < passesNeeded) {
+            // See ACTION_RETRY_COOLDOWN_MS's javadoc - a failed pickup gets no rejection text to key
+            // off, so this cooldown is the only thing standing between a stuck pickup and a flood.
+            if (now - lastFarmActionAt < ACTION_RETRY_COOLDOWN_MS) {
+                return new Action.Idle();
+            }
             if (pendingPickupOid != null) {
                 int oid = pendingPickupOid;
                 pendingPickupOid = null;
+                lastFarmActionAt = now;
                 return new Action.PickupItem(oid);
             }
-            Optional<WorldState.ItemDrop> drop = world.getItemDrops().stream()
-                    .filter(d -> d.itemId() == KpqConstants.ITEM_PASS).findFirst();
+            List<WorldState.ItemDrop> drops = world.getItemDrops().stream()
+                    .filter(d -> d.itemId() == KpqConstants.ITEM_PASS)
+                    .filter(d -> attemptsSoFar(d.objectId()) < MAX_TARGET_ATTEMPTS)
+                    .toList();
+            Optional<WorldState.ItemDrop> drop = pickSpread(drops);
             if (drop.isPresent()) {
-                pendingPickupOid = drop.get().objectId();
+                int oid = drop.get().objectId();
+                recordAttempt(oid);
+                pendingPickupOid = oid;
+                lastFarmActionAt = now;
                 return new Action.MoveTo(drop.get().position());
             }
             return new Action.Idle();   // waiting on members to farm/hand off their passes
@@ -396,6 +457,29 @@ public class KpqPlanner implements Planner {
             return new Action.UsePortal(KpqConstants.NEXT_STAGE_PORTAL);
         }
         return new Action.Idle();
+    }
+
+    /**
+     * Picks candidate {@code ordinal % size} rather than always the first, so that when several
+     * bots see the exact same candidate list (they usually do - {@link WorldState} snapshots are
+     * built from the same broadcasts) they spread across different targets instead of every one of
+     * them racing for whichever one happens to be first. Doesn't eliminate collisions (fewer
+     * candidates than bots still overlaps) but removes the common case for free, no coordination
+     * needed - see the class javadoc on why every bot decides independently.
+     */
+    private <T> Optional<T> pickSpread(List<T> candidates) {
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(candidates.get(ordinal % candidates.size()));
+    }
+
+    private int attemptsSoFar(int objectId) {
+        return targetAttempts.getOrDefault(objectId, 0);
+    }
+
+    private void recordAttempt(int objectId) {
+        targetAttempts.merge(objectId, 1, Integer::sum);
     }
 
     private static int matchCouponTarget(String text) {

@@ -27,13 +27,18 @@ import java.util.List;
  * java -cp ... bot.kpq.KpqBot maplestory 8484 kpqmem2 pass member 2
  * java -cp ... bot.kpq.KpqBot maplestory 8484 kpqmem3 pass member 3
  * </pre>
+ * An optional trailing minutes argument overrides {@link #DEFAULT_RUN_BUDGET_MINUTES} - keep this
+ * short (a few minutes) for anything exploratory, since a stuck bot should die on its own well before
+ * a human notices, not run for the full PQ timer. {@link bot.MapleConnection}'s own outbound rate cap
+ * bounds the damage a stuck loop can do either way; this is the second, independent layer.
  */
 public class KpqBot {
-    private static final long RUN_BUDGET_MS = 15 * 60 * 1000L;   // comfortably inside the 30-min PQ timer
+    private static final int DEFAULT_RUN_BUDGET_MINUTES = 5;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 6) {
-            System.err.println("usage: KpqBot <host> <port> <user> <pass> <leader|member> <ordinal> [inviteName,...]");
+            System.err.println("usage: KpqBot <host> <port> <user> <pass> <leader|member> <ordinal> "
+                    + "[inviteName,...] [budgetMinutes]");
             System.exit(1);
         }
         String host = args[0];
@@ -46,10 +51,12 @@ public class KpqBot {
         if (args.length > 6 && !args[6].isBlank()) {
             inviteNames.addAll(Arrays.asList(args[6].split(",")));
         }
+        int budgetMinutes = args.length > 7 ? Integer.parseInt(args[7]) : DEFAULT_RUN_BUDGET_MINUTES;
+        long runBudgetMs = budgetMinutes * 60 * 1000L;
         int passesNeeded = inviteNames.size();   // party size minus the leader
 
         System.out.println("=== KpqBot (" + role + ", ordinal=" + ordinal + ") ===");
-        System.out.printf("connecting to %s:%d as '%s'%n", host, port, user);
+        System.out.printf("connecting to %s:%d as '%s', run budget %d minute(s)%n", host, port, user, budgetMinutes);
         if (role == KpqPlanner.Role.LEADER) {
             System.out.println("will invite: " + inviteNames + ", needs " + passesNeeded + " pass(es) at stage 1");
         }
@@ -57,7 +64,7 @@ public class KpqBot {
         ChannelSession session = BotSession.loginAndEnterChannel(host, port, user, pass);
         KpqPlanner planner = new KpqPlanner(role, ordinal, inviteNames, passesNeeded);
         try (MapleConnection channel = session.connection()) {
-            BotSession.GameLoopResult result = BotSession.runGameLoop(channel, session.charId(), planner, RUN_BUDGET_MS);
+            BotSession.GameLoopResult result = BotSession.runGameLoop(channel, session.charId(), planner, runBudgetMs);
             report(role, result.world());
         }
     }

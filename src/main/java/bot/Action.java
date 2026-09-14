@@ -68,9 +68,16 @@ public sealed interface Action {
     record AttackMonster(int monsterObjectId, int damage) implements Action {}
 
     /**
-     * Picks up the map-dropped item {@code objectId}. {@code ItemPickupHandler} only rejects a pickup
-     * that's more than 800/600 px from the character's server-side position - always in range here
-     * since {@link ActionExecutor} moves the bot to the drop's tracked position first.
+     * Picks up the map-dropped item {@code objectId}. {@code ItemPickupHandler} itself only rejects a
+     * pickup more than 800/600 px from the character's server-side position - always in range here
+     * since {@link ActionExecutor} moves the bot to the drop's tracked position first - but
+     * {@code Character#pickupItem} underneath it has two more gates worth knowing about: a drop must
+     * be at least 400ms old, and {@code MapItem#canBePickedBy} requires either being the original
+     * owner or (party drops, which is the case that matters here) a member of the owner's party.
+     * Either rejection is silent from this bot's point of view - no error text, the item simply stays
+     * put - which is exactly why a caller must never retry this in a tight loop with no cooldown; see
+     * {@code KpqPlanner}'s {@code ACTION_RETRY_COOLDOWN_MS} javadoc for what happened the one time
+     * that was tried.
      */
     record PickupItem(int objectId) implements Action {}
 

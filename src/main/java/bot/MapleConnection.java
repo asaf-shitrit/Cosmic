@@ -19,7 +19,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
+import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Deque;
 
 /**
  * One TCP connection to a Cosmic server, speaking the v83 protocol as a client rather than as the
@@ -116,7 +118,29 @@ public class MapleConnection implements Closeable {
         return p;
     }
 
+    /**
+     * Outbound cap, enforced in {@link #send} itself rather than trusting every caller to throttle
+     * its own retries. Learned live: a {@code Planner} with an unguarded retry loop (a failed pickup
+     * with no cooldown, replanning promptly after every action - see {@code KpqPlanner}'s
+     * {@code ACTION_RETRY_COOLDOWN_MS} javadoc for the full story) drove one bot to roughly a
+     * thousand sends a second for several minutes, which wedged Docker Desktop's own management API
+     * hard enough to need a forced restart - nowhere near "the server slowed down", the *host*
+     * stopped responding. A planner-level cooldown fixes one loop; this fixes the whole class of bug,
+     * for every {@link Planner} this codebase will ever grow, at the one point every outbound packet
+     * already passes through regardless of which code path produced it. 20/sec is far above anything
+     * a legitimate action sequence needs (the fastest deliberate retry cadence anywhere in this
+     * codebase is one NPC talk per ~700ms) and orders of magnitude below what actually caused the
+     * incident.
+     */
+    private static final int MAX_PACKETS_PER_SECOND = 20;
+    private static final long RATE_WINDOW_MS = 1000;
+
+    /** Timestamps (ms) of sends within the current rate window, oldest first. */
+    private final Deque<Long> recentSendTimes = new ArrayDeque<>();
+
     public synchronized void send(Packet packet) throws IOException {
+        enforceOutboundRateLimit();
+
         byte[] body = packet.getBytes();
         byte[] header = sendCypher.getPacketHeader(body.length);
 
@@ -129,6 +153,43 @@ public class MapleConnection implements Closeable {
         System.arraycopy(body, 0, frame, header.length, body.length);
         out.write(frame);
         out.flush();
+    }
+
+    /**
+     * Blocks the caller until sending one more packet would keep this connection at or under
+     * {@link #MAX_PACKETS_PER_SECOND} within the trailing {@link #RATE_WINDOW_MS}, logging loudly the
+     * first time in a burst that throttling actually kicks in (repeating that on every single send
+     * while throttled would just be more flood, on stderr instead of the wire). Called from
+     * {@link #send}, which is already {@code synchronized}, so this never races with itself.
+     */
+    private void enforceOutboundRateLimit() {
+        long now = System.currentTimeMillis();
+        purgeExpired(now);
+
+        if (recentSendTimes.size() >= MAX_PACKETS_PER_SECOND) {
+            System.err.println("[WARN] MapleConnection: outbound rate limit hit (" + MAX_PACKETS_PER_SECOND
+                    + "/sec) - throttling. A caller is retrying far faster than any legitimate action "
+                    + "needs; this is almost certainly a missing cooldown upstream, not a real workload.");
+            while (recentSendTimes.size() >= MAX_PACKETS_PER_SECOND) {
+                long waitMs = RATE_WINDOW_MS - (now - recentSendTimes.peekFirst());
+                try {
+                    Thread.sleep(Math.max(1, waitMs));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                now = System.currentTimeMillis();
+                purgeExpired(now);
+            }
+        }
+
+        recentSendTimes.addLast(now);
+    }
+
+    private void purgeExpired(long now) {
+        while (!recentSendTimes.isEmpty() && now - recentSendTimes.peekFirst() >= RATE_WINDOW_MS) {
+            recentSendTimes.pollFirst();
+        }
     }
 
     /**
