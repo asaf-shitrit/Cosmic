@@ -56,8 +56,20 @@ public class KpqPlanner implements Planner {
      * attempts per second per bot before it was caught and killed.
      */
     private static final long ACTION_RETRY_COOLDOWN_MS = 800;
-    /** After this many unsuccessful attempts on the same drop/monster, stop retrying it and move on. */
-    private static final int MAX_TARGET_ATTEMPTS = 4;
+    /**
+     * After this many unsuccessful attempts on the same drop/monster, stop retrying it and move on.
+     * Live testing with 3-4 bots farming the same handful of mobs found every genuinely-still-valid
+     * target succeeds on the very first attempt - a second attempt on the same oid is essentially
+     * always "someone else already got it" (the removal broadcast is range-limited - see
+     * {@code MapleMap#broadcastMessage(Packet, Point)} - so a distant bot's copy of
+     * {@link WorldState#getItemDrops()}/{@link WorldState#getMonsters()} can lag well behind reality).
+     * With 3-4 bots converging on the same handful of concurrently-visible targets, retrying a stale
+     * one even a few times before giving up was measured costing whole *minutes* of wall-clock time
+     * across a farming run - by far the largest inefficiency found, well beyond the base drop-rate
+     * limit. 1 attempt keeps the safety property (bounded, still gated by
+     * {@link #ACTION_RETRY_COOLDOWN_MS}) while eliminating that cost almost entirely.
+     */
+    private static final int MAX_TARGET_ATTEMPTS = 1;
     /** Comfortably one-shots anything in this instance - see {@link Action.AttackMonster}'s javadoc. */
     private static final int ONE_SHOT_DAMAGE = 999_999;
 
