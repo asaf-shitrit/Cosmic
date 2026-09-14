@@ -11,6 +11,17 @@ public class InitializationVector {
         return bytes;
     }
 
+    /**
+     * Wraps the 4 IV bytes read off the wire. The server generates its own IVs, but a client
+     * has to rebuild both of them from the unencrypted hello packet to set up its cyphers.
+     */
+    public static InitializationVector of(byte[] bytes) {
+        if (bytes == null || bytes.length != 4) {
+            throw new IllegalArgumentException("An initialization vector must be exactly 4 bytes");
+        }
+        return new InitializationVector(bytes.clone());
+    }
+
     public static InitializationVector generateSend() {
         byte[] ivSend = {82, 48, 120, getRandomByte()};
         return new InitializationVector(ivSend);
