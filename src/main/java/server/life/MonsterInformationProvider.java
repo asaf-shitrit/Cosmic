@@ -45,6 +45,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MonsterInformationProvider {
     private static final Logger log = LoggerFactory.getLogger(MonsterInformationProvider.class);
@@ -58,7 +59,16 @@ public class MonsterInformationProvider {
 
     private final Map<Integer, List<MonsterDropEntry>> drops = new HashMap<>();
     private final List<MonsterGlobalDropEntry> globaldrops = new ArrayList<>();
-    private final Map<Integer, List<MonsterGlobalDropEntry>> continentDrops = new HashMap<>();
+    // ConcurrentHashMap, not HashMap: getRelevantGlobalDrops() below calls computeIfAbsent() on this
+    // map from whichever channel thread just killed a monster, with no external synchronization -
+    // multiple monsters dying in the same instant (e.g. several bots one-shotting mobs concurrently,
+    // which a human player essentially never does) raced HashMap's internal tree/bin restructuring
+    // and threw ConcurrentModificationException out of MapleMap#dropFromMonster, silently aborting
+    // the entire drop routine for that kill (no items, no exception surfaced to the player - it just
+    // looked like the monster dropped nothing). computeIfAbsent is atomic on ConcurrentHashMap, and
+    // loadContinentDrops() only reads the separate `globaldrops` list, so this is a straight
+    // thread-safety fix with no behavioural change on the non-racing path.
+    private final Map<Integer, List<MonsterGlobalDropEntry>> continentDrops = new ConcurrentHashMap<>();
 
     private final Map<Integer, List<Integer>> dropsChancePool = new HashMap<>();    // thanks to ronan
     private final Set<Integer> hasNoMultiEquipDrops = new HashSet<>();
