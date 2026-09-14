@@ -199,35 +199,39 @@ public class MapleConnection implements Closeable {
     private final AtomicInteger pingsAnswered = new AtomicInteger();
 
     /**
-     * Reads one packet, blocking until it arrives, answering the server's keepalive PING itself
-     * along the way rather than surfacing it to the caller.
+     * Reads one packet, blocking until it arrives, answering the server's keepalive PING itself along
+     * the way so no caller has to remember to - but still <em>returning</em> that PING frame like any
+     * other, rather than consuming it and looping for the next one.
      *
-     * <p>Found live: {@code Client#checkIfIdle} disconnects a connection that goes 30s+15s without a
-     * PONG, and PING answering used to be the game loop's job - fine for the loop itself (it reads in
-     * a tight cycle, so it always saw one promptly), but every <em>other</em> place that reads packets
-     * on this connection (login-sequence wait loops like {@code BotSession#receiveUntil}, or a
-     * {@code Planner} phase with a long stretch between actions - KPQ's stage-5 boss hunt, say)
-     * doesn't know PING exists and would silently let it through unanswered. That's a keepalive
-     * contract every single reader has to remember to honour, which is exactly the kind of thing that
-     * gets missed - one bot run was disconnected {@code ALL_IDLE} from precisely this gap. Handling it
-     * here instead - the one place every packet this connection ever receives passes through - makes
-     * it structurally impossible for a caller to get wrong, the same reasoning as the outbound rate
-     * limit living in {@link #send} rather than in each {@code Planner}.
+     * <p>Found live, the hard way: an earlier version of this method looped internally past PING
+     * frames entirely, never returning one to the caller. That looked safe (still bounded by
+     * {@link #setReadTimeoutMs}, so a genuinely quiet socket would still throw) but wasn't: on a
+     * mostly-idle connection the <em>only</em> traffic is the server's own periodic PING, which arrives
+     * more often than this bot's read-timeout window - so a real frame (a PING) always showed up
+     * before the timeout ever got a chance to fire, and the loop just kept answering PING after PING
+     * forever without ever returning. The driver loop's replan logic depends on {@link #receive()}
+     * actually returning on some cadence to get a turn at all - a PING was, accidentally, that cadence
+     * before centralizing keepalive here, since the old game loop replied to and then fell through
+     * every PING it read. Silently absorbing that turn-taking role was the bug, not the PONG-sending.
      *
-     * @return the decrypted packet, positioned at its opcode - never a PING, that's consumed here.
+     * <p>So: this still guarantees PONG gets sent (the part worth centralizing - see the class's
+     * outbound rate limit for the same reasoning, guard the mechanism, not each caller), but it always
+     * hands the frame back too, exactly like every other opcode. A caller that doesn't care what a PING
+     * is - {@code BotSession}'s dispatch, {@code receiveUntil}'s scan-for-opcode loops - already
+     * handles an unrecognized opcode harmlessly by design; this just makes sure one specific
+     * unrecognized opcode never goes unanswered.
+     *
+     * @return the decrypted packet, positioned at its opcode.
      */
     public synchronized InPacket receive() throws IOException {
-        while (true) {
-            InPacket p = receiveFrame();
-            int opcode = p.readShort() & 0xFFFF;
-            if (opcode == SendOpcode.PING.getValue()) {
-                send(packet(RecvOpcode.PONG.getValue()));
-                pingsAnswered.incrementAndGet();
-                continue;
-            }
-            p.seek(0);   // rewind - every caller's own convention starts by reading the opcode itself
-            return p;
+        InPacket p = receiveFrame();
+        int opcode = p.readShort() & 0xFFFF;
+        if (opcode == SendOpcode.PING.getValue()) {
+            send(packet(RecvOpcode.PONG.getValue()));
+            pingsAnswered.incrementAndGet();
         }
+        p.seek(0);   // rewind - every caller's own convention starts by reading the opcode itself
+        return p;
     }
 
     /** How many PINGs {@link #receive()} has answered on this connection - see its javadoc. */

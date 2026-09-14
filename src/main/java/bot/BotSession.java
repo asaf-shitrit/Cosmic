@@ -234,9 +234,9 @@ public class BotSession {
                 InPacket p = conn.receive();
                 int opcode = p.readShort() & 0xFFFF;
 
-                // No PING branch here - MapleConnection#receive() answers it and never returns it to
-                // any caller; see that method's javadoc for why this used to be (and no longer is)
-                // this loop's job.
+                // No PING branch here - MapleConnection#receive() answers it for us before returning
+                // it (see that method's javadoc), so a PING just falls through to world.accept() below
+                // like any other opcode WorldState doesn't track, and is silently ignored there.
                 if (opcode == SendOpcode.SET_FIELD.getValue()) {
                     // PlayerLoggedinHandler sends this once the character is in the channel/world
                     // player storage and map; the same opcode is reused for every later map change

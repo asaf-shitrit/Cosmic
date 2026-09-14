@@ -46,8 +46,9 @@ public class Spectator {
                     InPacket p = conn.receive();
                     int opcode = p.readShort() & 0xFFFF;
 
-                    // No PING branch needed - MapleConnection#receive() answers it internally now and
-                    // never surfaces it here; see that method's javadoc.
+                    // No PING branch needed - MapleConnection#receive() answers it for us before
+                    // returning it (see that method's javadoc), so it just falls through the checks
+                    // below unmatched, same as any other opcode this class doesn't track.
                     if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
                         int charId = p.readInt();   // leading field of spawnPlayerMapObject; rest unparsed
                         if (charId != session.charId()) {
