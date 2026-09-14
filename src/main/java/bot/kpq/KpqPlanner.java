@@ -70,8 +70,13 @@ public class KpqPlanner implements Planner {
      * {@link #ACTION_RETRY_COOLDOWN_MS}) while eliminating that cost almost entirely.
      */
     private static final int MAX_TARGET_ATTEMPTS = 1;
-    /** Comfortably one-shots anything in this instance - see {@link Action.AttackMonster}'s javadoc. */
-    private static final int ONE_SHOT_DAMAGE = 999_999;
+    /**
+     * Comfortably one-shots anything in this instance, stage 5 bosses included - see
+     * {@link Action.AttackMonster}'s javadoc on why there's no cap to stay under. Sized well past
+     * stage 1 mobs' actual HP (confirmed one-shot at the original 999,999) with a large margin for a
+     * boss that might have noticeably more.
+     */
+    private static final int ONE_SHOT_DAMAGE = 999_999_999;
 
     private final Role role;
     /** 0 = leader, 1.. = members, in the fixed order used to assign stage 2-4 rectangle slots. */
@@ -81,7 +86,7 @@ public class KpqPlanner implements Planner {
     /** Leader only: passes required at stage 1 (party size minus the leader). */
     private final int passesNeeded;
 
-    private enum Phase { PARTY_FORM, PARTY_WAIT_START, IN_STAGE1, IN_STAGE_POSITIONAL, DONE }
+    private enum Phase { PARTY_FORM, PARTY_WAIT_START, IN_STAGE1, IN_STAGE_POSITIONAL, IN_STAGE5, DONE }
 
     private enum Stage1MemberState { NEED_QUESTION, FARMING, SUBMITTING, HANDED_OFF }
 
@@ -116,6 +121,14 @@ public class KpqPlanner implements Planner {
     private boolean stage1Cleared = false;
     /** True once {@link #idleOrTryPortal} has sent this attempt's approach {@code MoveTo}; see there. */
     private boolean portalApproached = false;
+    /**
+     * Set once the leader sees stage 5's clear text. Same reasoning as {@link #stage1Cleared}:
+     * clearing consumes the leader's 10 passes (gainItem(4001008, -10) server-side), so
+     * {@code have < STAGE5_PASSES_NEEDED} would look identical to "not there yet" afterward. Stage 5
+     * has no portal to approach once cleared - {@code clearPQ()} is the actual end of the whole
+     * instance - so this just stops the leader from doing anything further, not from re-farming.
+     */
+    private boolean pqCleared = false;
 
     public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded) {
         this.role = role;
@@ -147,12 +160,15 @@ public class KpqPlanner implements Planner {
                 stage1TargetCoupons = -1;
                 stage1Cleared = false;
                 portalApproached = false;
+                pqCleared = false;
                 if (stageIndex == 0) {
                     phase = Phase.IN_STAGE1;
                 } else if (stageIndex >= 1 && stageIndex <= 3) {
                     phase = Phase.IN_STAGE_POSITIONAL;
-                } else if (stageIndex >= 4) {
-                    phase = Phase.DONE;   // stage 5 (boss) - not automated yet
+                } else if (stageIndex == 4) {
+                    phase = Phase.IN_STAGE5;
+                } else {
+                    phase = Phase.DONE;   // shouldn't happen - stage 5 has no next00 to warp past it
                 }
             }
         }
@@ -170,6 +186,7 @@ public class KpqPlanner implements Planner {
             case PARTY_WAIT_START -> planPartyWaitStart(world);
             case IN_STAGE1 -> role == Role.LEADER ? planStage1Leader(world) : planStage1Member(world);
             case IN_STAGE_POSITIONAL -> planStagePositional(world);
+            case IN_STAGE5 -> planStage5(world);
             case DONE -> new Action.Idle();
         };
     }
@@ -459,6 +476,112 @@ public class KpqPlanner implements Planner {
             }
         }
         return idleOrTryPortal(now);
+    }
+
+    /**
+     * Stage 5 (the boss): no puzzle, no question - every one of the 10 fixed boss mobs
+     * ({@link KpqConstants#MOB_STAGE5}) drops a pass at ~100% (per the drop tables), and the leader
+     * needs {@link KpqConstants#STAGE5_PASSES_NEEDED} of them (a {@code >=} check, unlike stage 1's
+     * exact equality - see {@code AbstractPlayerInteraction#haveItem} - so no overshoot correction is
+     * needed here). Every bot, leader included, farms bosses identically; a non-leader immediately
+     * hands off any pass it ends up holding exactly like stage 1's HANDED_OFF, while the leader keeps
+     * its own and additionally scavenges any pass dropped by someone else. There's no {@code next00}
+     * on this map (confirmed against the WZ data) - completion is {@code eim.clearPQ()} firing when
+     * the leader submits, not a portal walk, so a cleared PQ just goes idle rather than approaching
+     * anything.
+     */
+    private Action planStage5(WorldState world) {
+        long now = System.currentTimeMillis();
+
+        if (role == Role.LEADER) {
+            if (pqCleared) {
+                return new Action.Idle();
+            }
+            int have = world.getEtcQuantity(KpqConstants.ITEM_PASS);
+            if (have >= KpqConstants.STAGE5_PASSES_NEEDED) {
+                WorldState.NpcTalk talk = world.getLastNpcTalk();
+                if (talk != null && talk.npcId() == KpqConstants.NPC_STAGE && !talk.equals(lastHandledTalk)) {
+                    lastHandledTalk = talk;
+                    lastNpcTalkAt = now;
+                    if (talk.text().contains("the last, bonus stage")) {
+                        pqCleared = true;   // "Here's the portal that leads you to the last, bonus stage..."
+                    }
+                    return new Action.RespondToNpc(talk.msgType(), true, null);
+                }
+                if (now - lastNpcTalkAt < NPC_TALK_COOLDOWN_MS) {
+                    return new Action.Idle();
+                }
+                Optional<WorldState.NpcSighting> npc = findNpc(world, KpqConstants.NPC_STAGE);
+                if (npc.isEmpty()) {
+                    return new Action.Idle();
+                }
+                lastNpcTalkAt = now;
+                return new Action.TalkToNpc(npc.get().objectId());
+            }
+        } else {
+            int have = world.getEtcQuantity(KpqConstants.ITEM_PASS);
+            if (have > 0) {
+                if (now - lastFarmActionAt < ACTION_RETRY_COOLDOWN_MS) {
+                    return new Action.Idle();
+                }
+                lastFarmActionAt = now;
+                return new Action.DropItem(KpqConstants.ITEM_PASS, have);
+            }
+        }
+
+        // Shared farming, both roles: kill a boss or pick up any pass on the ground. A member that
+        // happens to pick up someone else's drop just relays it (hands it straight off next tick,
+        // above) rather than losing it - harmless, and one less thing that has to reach the leader in
+        // one hop given every single one of the 10 passes has to arrive there eventually.
+        if (now - lastFarmActionAt < ACTION_RETRY_COOLDOWN_MS) {
+            return new Action.Idle();
+        }
+        if (pendingPickupOid != null) {
+            int oid = pendingPickupOid;
+            pendingPickupOid = null;
+            lastFarmActionAt = now;
+            return new Action.PickupItem(oid);
+        }
+        if (pendingAttackOid != null) {
+            int oid = pendingAttackOid;
+            pendingAttackOid = null;
+            lastFarmActionAt = now;
+            return new Action.AttackMonster(oid, ONE_SHOT_DAMAGE);
+        }
+        List<WorldState.ItemDrop> drops = world.getItemDrops().stream()
+                .filter(d -> d.itemId() == KpqConstants.ITEM_PASS)
+                .filter(d -> attemptsSoFar(d.objectId()) < MAX_TARGET_ATTEMPTS)
+                .toList();
+        Optional<WorldState.ItemDrop> drop = pickSpread(drops);
+        if (drop.isPresent()) {
+            int oid = drop.get().objectId();
+            recordAttempt(oid);
+            pendingPickupOid = oid;
+            lastFarmActionAt = now;
+            return new Action.MoveTo(drop.get().position());
+        }
+        List<WorldState.MonsterSighting> bosses = world.getMonsters().stream()
+                .filter(m -> isStage5Boss(m.monsterId()))
+                .filter(m -> attemptsSoFar(m.objectId()) < MAX_TARGET_ATTEMPTS)
+                .toList();
+        Optional<WorldState.MonsterSighting> boss = pickSpread(bosses);
+        if (boss.isPresent()) {
+            int oid = boss.get().objectId();
+            recordAttempt(oid);
+            pendingAttackOid = oid;
+            lastFarmActionAt = now;
+            return new Action.MoveTo(boss.get().position());
+        }
+        return new Action.Idle();   // no boss/drop visible - either between kills or the pool's exhausted
+    }
+
+    private static boolean isStage5Boss(int monsterId) {
+        for (int id : KpqConstants.MOB_STAGE5) {
+            if (id == monsterId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

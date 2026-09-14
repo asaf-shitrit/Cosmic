@@ -32,6 +32,19 @@ final class KpqConstants {
     static final int ITEM_PASS = 4001008;
     static final int MOB_STAGE1 = 9300001;
 
+    /**
+     * Stage 5's fixed boss pool: 6x 9300000, 3x 9300002, 1x 9300003 (10 total, per the drop tables -
+     * every one drops {@code ITEM_PASS} at ~100% chance). Unlike stage 1's {@code MOB_STAGE1}, these
+     * never respawn - {@code KerningPQ.js#respawnStages} only re-triggers {@code instanceMapRespawn()}
+     * on maps 103000800 and 103000805, not 103000804 - so once all 10 are dead, farming is over
+     * regardless of how many passes actually made it to the leader.
+     */
+    static final int[] MOB_STAGE5 = {9300000, 9300002, 9300003};
+
+    /** Stage 5's clear requires the leader to hold this many passes - checked with {@code >=}, not
+     * exact equality (unlike stage 1's {@code ==}) - see {@code AbstractPlayerInteraction#haveItem}. */
+    static final int STAGE5_PASSES_NEEDED = 10;
+
     /** The portal all stage 1-4 maps use to advance, once {@code NstageClear} is set. */
     static final String NEXT_STAGE_PORTAL = "next00";
 
