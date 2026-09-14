@@ -176,9 +176,11 @@ public class BotSession {
 
     /**
      * Reads channel packets, feeds spawn/despawn ones to a {@link WorldState}, and drives a
-     * {@link ScriptedPlanner} against it via {@link ActionExecutor} - all while still replying PONG
-     * to every PING so the server's idle disconnect (Client#checkIfIdle, 30s idle + 15s grace) never
-     * fires. Runs for a fixed wall-clock budget, then exits, printing evidence of what it observed.
+     * {@link ScriptedPlanner} against it via {@link ActionExecutor} - all while {@code conn} keeps
+     * answering the server's keepalive PING with a PONG on its own (see
+     * {@link MapleConnection#receive()}) so the server's idle disconnect (Client#checkIfIdle, 30s idle
+     * + 15s grace) never fires. Runs for a fixed wall-clock budget, then exits, printing evidence of
+     * what it observed.
      */
     private static void runGameLoop(MapleConnection conn, int charId) throws IOException {
         Planner planner = new ScriptedPlanner("Hello, world! (bot " + charId + " reporting in)");
@@ -220,10 +222,9 @@ public class BotSession {
         WorldState world = new WorldState(charId);
         ActionExecutor executor = new ActionExecutor(conn, world);
 
-        System.out.println("[..]   entering game loop, watching for world entry and the keepalive PING");
+        System.out.println("[..]   entering game loop, watching for world entry (keepalive is MapleConnection's job now)");
         long deadline = System.currentTimeMillis() + budgetMs;
         boolean sawSetField = false;
-        boolean sawPingPong = false;
         int lastPlannedVersion = -1;
         long lastPlanAt = 0;
         boolean forceReplan = true;   // always take the first opportunity to plan
@@ -233,11 +234,10 @@ public class BotSession {
                 InPacket p = conn.receive();
                 int opcode = p.readShort() & 0xFFFF;
 
-                if (opcode == SendOpcode.PING.getValue()) {
-                    conn.send(MapleConnection.packet(RecvOpcode.PONG.getValue()));
-                    sawPingPong = true;
-                    System.out.println("[ok]   received PING, replied PONG - connection stayed alive");
-                } else if (opcode == SendOpcode.SET_FIELD.getValue()) {
+                // No PING branch here - MapleConnection#receive() answers it and never returns it to
+                // any caller; see that method's javadoc for why this used to be (and no longer is)
+                // this loop's job.
+                if (opcode == SendOpcode.SET_FIELD.getValue()) {
                     // PlayerLoggedinHandler sends this once the character is in the channel/world
                     // player storage and map; the same opcode is reused for every later map change
                     // (Character#changeMap -> PacketCreator.getWarpToMap) - see onMapChanged javadoc.
@@ -285,7 +285,7 @@ public class BotSession {
             }
         }
 
-        return new GameLoopResult(world, sawSetField, sawPingPong);
+        return new GameLoopResult(world, sawSetField, conn.getPingsAnswered() > 0);
     }
 
     /**

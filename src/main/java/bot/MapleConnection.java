@@ -5,6 +5,8 @@ import io.netty.buffer.Unpooled;
 import net.encryption.InitializationVector;
 import net.encryption.MapleAESOFB;
 import net.encryption.MapleCustomEncryption;
+import net.opcodes.RecvOpcode;
+import net.opcodes.SendOpcode;
 import net.packet.ByteBufInPacket;
 import net.packet.ByteBufOutPacket;
 import net.packet.InPacket;
@@ -22,6 +24,7 @@ import java.net.SocketTimeoutException;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * One TCP connection to a Cosmic server, speaking the v83 protocol as a client rather than as the
@@ -192,12 +195,48 @@ public class MapleConnection implements Closeable {
         }
     }
 
+    /** Bumped every time {@link #receive()} transparently answers a PING - see its javadoc. */
+    private final AtomicInteger pingsAnswered = new AtomicInteger();
+
     /**
-     * Reads one packet, blocking until it arrives.
+     * Reads one packet, blocking until it arrives, answering the server's keepalive PING itself
+     * along the way rather than surfacing it to the caller.
      *
-     * @return the decrypted packet, positioned at its opcode.
+     * <p>Found live: {@code Client#checkIfIdle} disconnects a connection that goes 30s+15s without a
+     * PONG, and PING answering used to be the game loop's job - fine for the loop itself (it reads in
+     * a tight cycle, so it always saw one promptly), but every <em>other</em> place that reads packets
+     * on this connection (login-sequence wait loops like {@code BotSession#receiveUntil}, or a
+     * {@code Planner} phase with a long stretch between actions - KPQ's stage-5 boss hunt, say)
+     * doesn't know PING exists and would silently let it through unanswered. That's a keepalive
+     * contract every single reader has to remember to honour, which is exactly the kind of thing that
+     * gets missed - one bot run was disconnected {@code ALL_IDLE} from precisely this gap. Handling it
+     * here instead - the one place every packet this connection ever receives passes through - makes
+     * it structurally impossible for a caller to get wrong, the same reasoning as the outbound rate
+     * limit living in {@link #send} rather than in each {@code Planner}.
+     *
+     * @return the decrypted packet, positioned at its opcode - never a PING, that's consumed here.
      */
     public synchronized InPacket receive() throws IOException {
+        while (true) {
+            InPacket p = receiveFrame();
+            int opcode = p.readShort() & 0xFFFF;
+            if (opcode == SendOpcode.PING.getValue()) {
+                send(packet(RecvOpcode.PONG.getValue()));
+                pingsAnswered.incrementAndGet();
+                continue;
+            }
+            p.seek(0);   // rewind - every caller's own convention starts by reading the opcode itself
+            return p;
+        }
+    }
+
+    /** How many PINGs {@link #receive()} has answered on this connection - see its javadoc. */
+    public int getPingsAnswered() {
+        return pingsAnswered.get();
+    }
+
+    /** The raw frame read/decrypt, with no opcode-specific handling - {@link #receive()}'s helper. */
+    private InPacket receiveFrame() throws IOException {
         byte[] headerBytes = new byte[HEADER_LENGTH];
         in.readFully(headerBytes);
 

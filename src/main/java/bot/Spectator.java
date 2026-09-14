@@ -1,6 +1,5 @@
 package bot;
 
-import net.opcodes.RecvOpcode;
 import net.opcodes.SendOpcode;
 import net.packet.InPacket;
 
@@ -47,9 +46,9 @@ public class Spectator {
                     InPacket p = conn.receive();
                     int opcode = p.readShort() & 0xFFFF;
 
-                    if (opcode == SendOpcode.PING.getValue()) {
-                        conn.send(MapleConnection.packet(RecvOpcode.PONG.getValue()));
-                    } else if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
+                    // No PING branch needed - MapleConnection#receive() answers it internally now and
+                    // never surfaces it here; see that method's javadoc.
+                    if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
                         int charId = p.readInt();   // leading field of spawnPlayerMapObject; rest unparsed
                         if (charId != session.charId()) {
                             System.out.println("[see]   player " + charId + " is in this map");
