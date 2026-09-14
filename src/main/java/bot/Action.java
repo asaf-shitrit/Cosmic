@@ -29,6 +29,71 @@ public sealed interface Action {
     /** Sends one line of general chat. */
     record Say(String message) implements Action {}
 
+    /**
+     * Creates a brand-new party with this bot as leader. {@code PartyOperationHandler} operation 1;
+     * no payload beyond the sub-opcode byte.
+     */
+    record CreateParty() implements Action {}
+
+    /**
+     * Invites {@code characterName} (must already be online, in this channel, unpartied) to this
+     * bot's party. {@code PartyOperationHandler} operation 4.
+     */
+    record InviteToParty(String characterName) implements Action {}
+
+    /**
+     * Accepts a pending party invite for {@code partyId}. {@code PartyOperationHandler} operation 3 -
+     * the id must match one {@link WorldState#getPendingPartyInvite()} actually observed, since the
+     * server resolves it via {@code InviteCoordinator} rather than trusting the id blindly.
+     */
+    record AcceptPartyInvite(int partyId) implements Action {}
+
+    /**
+     * Continues an NPC conversation already opened by a prior {@link TalkToNpc}. {@code lastMsgType}
+     * must echo the type byte of the most recent {@code NPC_TALK} response (see
+     * {@link WorldState#getLastNpcTalk()}) - {@code NPCMoreTalkHandler} uses it to decide how to
+     * interpret {@code selection}. {@code proceed} is the "OK/Next/Yes" click; {@code selection} is
+     * only meaningful for a "simple" (numbered-link, type 4) message and is ignored otherwise.
+     */
+    record RespondToNpc(int lastMsgType, boolean proceed, Integer selection) implements Action {}
+
+    /**
+     * Declares {@code damage} against a monster's single hit with a plain (skill 0) melee swing.
+     * {@code AbstractDealDamageHandler} trusts this value outright when {@code skill == 0} - the
+     * whole MP-cost/mob-count validation block is gated behind {@code attack.skill != 0} - and even
+     * the autoban distance/damage sanity checks are no-ops with {@code USE_AUTOBAN: false} (see
+     * {@code AbstractDealDamageHandler#parseDamage}/{@code #applyAttack}). One shot is enough for
+     * anything this quest throws at it.
+     */
+    record AttackMonster(int monsterObjectId, int damage) implements Action {}
+
+    /**
+     * Picks up the map-dropped item {@code objectId}. {@code ItemPickupHandler} only rejects a pickup
+     * that's more than 800/600 px from the character's server-side position - always in range here
+     * since {@link ActionExecutor} moves the bot to the drop's tracked position first.
+     */
+    record PickupItem(int objectId) implements Action {}
+
+    /**
+     * Drops {@code quantity} of {@code itemId} from the ETC inventory onto the ground.
+     * {@code ItemMoveHandler} resolves the slot itself from {@code itemId} via
+     * {@link WorldState#getEtcSlot(int)} - dropped items spawn FFA ({@code dropType == 2}, see
+     * {@code InventoryManipulator#drop} -> {@code MapleMap#spawnItemDrop(..., ffaDrop=true, ...)}),
+     * so any other party member can pick it straight back up with no ownership timer to race.
+     */
+    record DropItem(int itemId, int quantity) implements Action {}
+
+    /**
+     * Walks through a named portal on the current map. {@code ChangeMapHandler} resolves the target
+     * purely from {@code portalName} looked up on the character's current map (not from a client-sent
+     * target map id - that field is only honoured for GM warps) and then runs the portal's own script
+     * ({@code enter(pi)}), which for KPQ's {@code next00} portals gates on the relevant
+     * {@code NstageClear} eim property - safe to attempt speculatively before the stage is actually
+     * clear, since a rejected attempt just leaves the character in place with a drop message, no
+     * packet-level error.
+     */
+    record UsePortal(String portalName) implements Action {}
+
     /** Nothing to do this tick. */
     record Idle() implements Action {}
 }

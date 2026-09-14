@@ -163,14 +163,47 @@ public class BotSession {
      * fires. Runs for a fixed wall-clock budget, then exits, printing evidence of what it observed.
      */
     private static void runGameLoop(MapleConnection conn, int charId) throws IOException {
+        Planner planner = new ScriptedPlanner("Hello, world! (bot " + charId + " reporting in)");
+        GameLoopResult result = runGameLoop(conn, charId, planner, GAME_LOOP_BUDGET_MS);
+
+        System.out.println();
+        System.out.println(result.sawSetField()
+                ? "[ok]   confirmed in-world (SET_FIELD observed)"
+                : "[WARN] never saw SET_FIELD - character may not have fully entered the world");
+        System.out.println(result.sawPingPong()
+                ? "[ok]   confirmed keepalive works (PING answered with PONG, no disconnect)"
+                : "[WARN] no PING observed within the wait window - keepalive not verified this run");
+        System.out.println("[ok]   final position (as last commanded): " + result.world().getSelfPosition());
+
+        if (result.sawSetField() && result.sawPingPong()) {
+            System.out.println("BOT SESSION PASSED - character is in the world and survives the server's keepalive.");
+        }
+    }
+
+    /** What a {@link #runGameLoop(MapleConnection, int, Planner, long)} run observed, for a caller to report on. */
+    public record GameLoopResult(WorldState world, boolean sawSetField, boolean sawPingPong) {}
+
+    /**
+     * The reusable half of the game loop above: perceive, replan, act, keepalive, for {@code budgetMs}
+     * of wall-clock time against {@code planner}. Factored out so other entry points (see
+     * {@code bot.kpq.KpqBot}) can drive a longer-running, purpose-built {@link Planner} through the
+     * exact same perception/action wiring proven here, rather than duplicating the PING/PONG and
+     * replan-cadence bookkeeping.
+     *
+     * <p>Every {@code SET_FIELD} - not just the first - triggers {@link WorldState#onMapChanged()}.
+     * The very first one is genuinely a "just entered the world" signal; every later one is a map
+     * change (see that method's javadoc for why decoding the new map id isn't worth it here) after
+     * which any NPC/monster/drop object id from the previous map would be actively wrong to keep.
+     */
+    public static GameLoopResult runGameLoop(MapleConnection conn, int charId, Planner planner, long budgetMs)
+            throws IOException {
         conn.setReadTimeoutMs(READ_TICK_MS);
 
         WorldState world = new WorldState(charId);
         ActionExecutor executor = new ActionExecutor(conn, world);
-        Planner planner = new ScriptedPlanner("Hello, world! (bot " + charId + " reporting in)");
 
         System.out.println("[..]   entering game loop, watching for world entry and the keepalive PING");
-        long deadline = System.currentTimeMillis() + GAME_LOOP_BUDGET_MS;
+        long deadline = System.currentTimeMillis() + budgetMs;
         boolean sawSetField = false;
         boolean sawPingPong = false;
         int lastPlannedVersion = -1;
@@ -188,9 +221,11 @@ public class BotSession {
                     System.out.println("[ok]   received PING, replied PONG - connection stayed alive");
                 } else if (opcode == SendOpcode.SET_FIELD.getValue()) {
                     // PlayerLoggedinHandler sends this once the character is in the channel/world
-                    // player storage and map - direct proof we're really in-game.
+                    // player storage and map; the same opcode is reused for every later map change
+                    // (Character#changeMap -> PacketCreator.getWarpToMap) - see onMapChanged javadoc.
                     sawSetField = true;
-                    System.out.println("[ok]   received SET_FIELD - character has entered the game world");
+                    world.onMapChanged();
+                    System.out.println("[ok]   received SET_FIELD - character entered the world/a new map");
                 } else {
                     String note = world.accept(opcode, p);
                     if (note != null) {
@@ -219,18 +254,7 @@ public class BotSession {
             }
         }
 
-        System.out.println();
-        System.out.println(sawSetField
-                ? "[ok]   confirmed in-world (SET_FIELD observed)"
-                : "[WARN] never saw SET_FIELD - character may not have fully entered the world");
-        System.out.println(sawPingPong
-                ? "[ok]   confirmed keepalive works (PING answered with PONG, no disconnect)"
-                : "[WARN] no PING observed within the wait window - keepalive not verified this run");
-        System.out.println("[ok]   final position (as last commanded): " + world.getSelfPosition());
-
-        if (sawSetField && sawPingPong) {
-            System.out.println("BOT SESSION PASSED - character is in the world and survives the server's keepalive.");
-        }
+        return new GameLoopResult(world, sawSetField, sawPingPong);
     }
 
     /**
