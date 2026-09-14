@@ -24,3 +24,12 @@ database/docker-pg-db-data
 
 # macOS files
 .DS_Store
+
+# Credentials - never commit API keys or tokens
+*.env
+*.key
+*.key.txt
+
+# Client binaries are Nexon IP and must never be committed to this repo.
+# (Does not affect wz/**/*.img.xml, which is the server's own extracted data.)
+*.exe
