@@ -244,6 +244,19 @@ public class BotSession {
                     sawSetField = true;
                     world.onMapChanged();
                     System.out.println("[ok]   received SET_FIELD - character entered the world/a new map");
+
+                    // Character#changeMap sets mapTransitioning=true on every single map change (not
+                    // just login), and ChangeMapHandler refuses to process ANY further CHANGE_MAP
+                    // request while it's true (chr.isChangingMaps() is the very first check) - the
+                    // real client clears it by sending PLAYER_MAP_TRANSFER once it's done loading the
+                    // new map. Found live: without this, a bot's first portal-triggered map change
+                    // (e.g. KPQ's entryMap warp) leaves it permanently unable to use any *subsequent*
+                    // portal - every UsePortal attempt fails the isChangingMaps() check silently
+                    // (enableActions, no error text) forever after, indistinguishable from the 632px
+                    // proximity rejection without reading this handler specifically. This has no
+                    // per-action decision to make, so it belongs in the driver loop next to PING/PONG,
+                    // not exposed to a Planner.
+                    conn.send(MapleConnection.packet(RecvOpcode.PLAYER_MAP_TRANSFER.getValue()));
                 } else {
                     String note = world.accept(opcode, p);
                     if (note != null) {
