@@ -155,6 +155,8 @@ import client.command.commands.gm4.BossDropRateCommand;
 import client.command.commands.gm4.CakeCommand;
 import client.command.commands.gm4.DropRateCommand;
 import client.command.commands.gm4.ExpRateCommand;
+import client.command.commands.gm4.FakePlayerCommand;
+import client.command.commands.gm4.FakePlayerRemoveCommand;
 import client.command.commands.gm4.FishingRateCommand;
 import client.command.commands.gm4.ForceVacCommand;
 import client.command.commands.gm4.HorntailCommand;
@@ -517,6 +519,8 @@ public class CommandsExecutor {
         addCommand("cake", 4, CakeCommand.class);
         addCommand("playernpc", 4, PlayerNpcCommand.class);
         addCommand("playernpcremove", 4, PlayerNpcRemoveCommand.class);
+        addCommand("fakeplayer", 4, FakePlayerCommand.class);
+        addCommand("fakeplayerremove", 4, FakePlayerRemoveCommand.class);
         addCommand("pnpc", 4, PnpcCommand.class);
         addCommand("pnpcremove", 4, PnpcRemoveCommand.class);
         addCommand("pmob", 4, PmobCommand.class);

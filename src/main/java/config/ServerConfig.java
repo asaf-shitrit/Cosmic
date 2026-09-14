@@ -253,6 +253,10 @@ public class ServerConfig {
     public boolean PLAYERNPC_ORGANIZE_AREA;
     public boolean PLAYERNPC_AUTODEPLOY;
 
+    //Fake Player Configuration
+    public boolean USE_FAKE_PLAYERS;
+    public int FAKE_PLAYERS_PER_TOWN;
+
     //Pet Auto-Pot Configuration
     public boolean USE_COMPULSORY_AUTOPOT;
     public boolean USE_EQUIPS_ON_AUTOPOT;

@@ -89,6 +89,7 @@ import server.MTSItemInfo;
 import server.ShopItem;
 import server.Trade;
 import server.events.gm.Snowball;
+import server.life.FakePlayer;
 import server.life.MobSkill;
 import server.life.MobSkillId;
 import server.life.Monster;
@@ -2039,6 +2040,124 @@ public class PacketCreator {
         p.writeByte(0);
         p.writeByte(chr.getTeam());//only needed in specific fields
         return p;
+    }
+
+    /**
+     * Gets a packet spawning a {@link FakePlayer} as a map object. This mirrors
+     * {@link #spawnPlayerMapObject}, writing the "nothing here" form of every field a fake player
+     * can't have: no guild, no buffs, no pets, no mount, no shop, no chalkboard and no rings.
+     *
+     * @param fp The fake player to spawn.
+     * @return The spawn player packet.
+     */
+    public static Packet spawnFakePlayer(FakePlayer fp) {
+        OutPacket p = OutPacket.create(SendOpcode.SPAWN_PLAYER);
+        p.writeInt(fp.getCharacterId());
+        p.writeByte(fp.getLevel()); //v83
+        p.writeString(fp.getName());
+        p.writeString("");              // guild name
+        p.writeBytes(new byte[6]);      // guild emblem
+
+        writeNoForeignBuffs(p);
+
+        p.writeShort(fp.getJobId());
+        addFakeCharLook(p, fp);
+
+        p.writeInt(0);                  // hearts (heart-shaped chocolate count)
+        p.writeInt(0);                  // item effect
+        p.writeInt(0);                  // chair
+
+        p.writePos(fp.getPosition());
+        p.writeByte(fp.getStance());
+
+        p.writeShort(0);                // foothold
+        p.writeByte(0);
+        p.writeByte(0);                 // end of pets
+        p.writeInt(1);                  // mount level
+        p.writeLong(0);                 // mount exp + tiredness
+        p.writeByte(0);                 // no announce box
+        p.writeByte(0);                 // no chalkboard
+        p.writeByte(0);                 // no crush ring
+        p.writeByte(0);                 // no friendship ring
+        p.writeByte(0);                 // no marriage ring
+        p.writeByte(0);                 // no new year cards
+        p.writeByte(0);
+        p.writeByte(0);
+        p.writeByte(0);                 // team
+        return p;
+    }
+
+    /**
+     * The no-buffs form of {@link #writeForeignBuffs}. The skips and magic spawn ints are not
+     * padding the client ignores - keep this in step with writeForeignBuffs if that changes.
+     */
+    private static void writeNoForeignBuffs(OutPacket p) {
+        p.writeInt(0);
+        p.writeShort(0); //v83
+        p.writeByte(0xFC);
+        p.writeByte(1);
+        p.writeInt(0);                  // not morphed
+        p.writeInt(0);                  // buffmask, high half
+        p.writeInt(0);                  // buffmask, low half
+
+        // Energy Charge
+        p.writeInt(0);
+        p.writeShort(0);
+        p.skip(4);
+
+        // Dash Speed
+        p.writeInt(0);
+        p.skip(11);
+        p.writeShort(0);
+        // Dash Jump
+        p.skip(9);
+        p.writeInt(0);
+        p.writeShort(0);
+        p.writeByte(0);
+
+        // Monster Riding
+        p.writeLong(0);
+
+        int CHAR_MAGIC_SPAWN = Randomizer.nextInt();
+        p.writeInt(CHAR_MAGIC_SPAWN);
+        // Speed Infusion
+        p.skip(8);
+        p.writeInt(CHAR_MAGIC_SPAWN);
+        p.writeByte(0);
+        p.writeInt(CHAR_MAGIC_SPAWN);
+        p.writeShort(0);
+        // Homing Beacon
+        p.skip(9);
+        p.writeInt(CHAR_MAGIC_SPAWN);
+        p.writeInt(0);
+        // Zombify
+        p.skip(9);
+        p.writeInt(CHAR_MAGIC_SPAWN);
+        p.writeShort(0);
+        p.writeShort(0);
+    }
+
+    /**
+     * The {@link FakePlayer} form of {@link #addCharLook}. Equips are already stored by their
+     * packet slot, so unlike addCharEquips there is no inventory to translate and no masking.
+     */
+    private static void addFakeCharLook(OutPacket p, FakePlayer fp) {
+        p.writeByte(fp.getGender());
+        p.writeByte(fp.getSkinColor());
+        p.writeInt(fp.getFace());
+        p.writeBool(true);              // not a megaphone look
+        p.writeInt(fp.getHair());
+
+        for (Entry<Short, Integer> equip : fp.getEquips().entrySet()) {
+            p.writeByte(equip.getKey());
+            p.writeInt(equip.getValue());
+        }
+        p.writeByte(0xFF);              // end of equips
+        p.writeByte(0xFF);              // end of masked equips (none)
+        p.writeInt(0);                  // no cash weapon
+        for (int i = 0; i < 3; i++) {
+            p.writeInt(0);              // no pets
+        }
     }
 
     private static void encodeNewYearCardInfo(OutPacket p, Character chr) {

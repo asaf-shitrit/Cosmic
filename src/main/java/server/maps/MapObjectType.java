@@ -34,6 +34,7 @@ public enum MapObjectType {
     REACTOR,
     HIRED_MERCHANT,
     PLAYER_NPC,
+    FAKE_PLAYER,
     DRAGON,
     KITE
 }

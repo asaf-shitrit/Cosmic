@@ -57,6 +57,7 @@ import server.events.gm.Fitness;
 import server.events.gm.Ola;
 import server.events.gm.OxQuiz;
 import server.events.gm.Snowball;
+import server.life.FakePlayer;
 import server.life.LifeFactory;
 import server.life.LifeFactory.selfDestruction;
 import server.life.Monster;
@@ -381,6 +382,24 @@ public class MapleMap {
         objectWLock.lock();
         try {
             this.mapobjects.put(pnpcobject.getObjectId(), pnpcobject);
+        } finally {
+            objectWLock.unlock();
+        }
+    }
+
+    public void addFakePlayerMapObject(FakePlayer fakePlayer) {
+        objectWLock.lock();
+        try {
+            this.mapobjects.put(fakePlayer.getObjectId(), fakePlayer);
+        } finally {
+            objectWLock.unlock();
+        }
+    }
+
+    public void removeFakePlayerMapObject(FakePlayer fakePlayer) {
+        objectWLock.lock();
+        try {
+            this.mapobjects.remove(fakePlayer.getObjectId());
         } finally {
             objectWLock.unlock();
         }
@@ -2862,6 +2881,7 @@ public class MapleMap {
             case PLAYER:
             case HIRED_MERCHANT:
             case PLAYER_NPC:
+            case FAKE_PLAYER:
             case DRAGON:
             case MIST:
             case KITE:

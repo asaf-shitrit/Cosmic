@@ -68,6 +68,7 @@ import server.SkillbookInformationProvider;
 import server.ThreadManager;
 import server.TimerManager;
 import server.expeditions.ExpeditionBossLog;
+import server.life.FakePlayerService;
 import server.life.PlayerNPC;
 import server.quest.Quest;
 import service.NoteService;
@@ -110,6 +111,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class Server {
     private static final Logger log = LoggerFactory.getLogger(Server.class);
+
     private static Server instance = null;
 
     public static Server getInstance() {
@@ -947,6 +949,26 @@ public class Server {
         for (Channel ch : this.getAllChannels()) {
             ch.reloadEventScriptManager();
         }
+
+        if (YamlConfig.config.server.USE_FAKE_PLAYERS) {
+            FakePlayerService.getInstance().start();
+            populateTownsWithFakePlayers();
+        }
+    }
+
+    /**
+     * Scatters fake players across the main towns of every channel so a fresh server doesn't look
+     * deserted. Loading these maps up front also means the towns are warm before anyone logs in.
+     */
+    private void populateTownsWithFakePlayers() {
+        FakePlayerService service = FakePlayerService.getInstance();
+        int spawned = 0;
+        for (World world : this.getWorlds()) {
+            for (Channel channel : world.getChannels()) {
+                spawned += service.populateChannel(channel);
+            }
+        }
+        log.info("Spawned {} fake players across the world", spawned);
     }
 
     private ChannelDependencies registerChannelDependencies() {
