@@ -435,6 +435,14 @@ server:
     RESIDENTS_SESSION_MIN_SECONDS: 300  #Length of one wake.
     RESIDENTS_SESSION_MAX_SECONDS: 900
     RESIDENTS_WAKE_GAP_SECONDS: 90      #Least time between two residents starting to wake - no login bursts.
+
+    #Ambient Companions - a companion arrives on their own while you train alone on a field.
+    #Only on maps with mob spawns, never inside an event or party quest, and never while you already
+    #have company. They are summoned at your own level (see CompanionLoadout.levelFor), join your
+    #party, follow you and fight. Every live companion costs one of BOT_BUDGET_MAX_CONNECTED.
+    AMBIENT_COMPANIONS_ENABLED: true
+    AMBIENT_COMPANIONS_DWELL_SECONDS: 3     #How long you must stay on one map before one shows up.
+    AMBIENT_COMPANIONS_COOLDOWN_MINUTES: 10 #Least time between two companions for the same player.
     RESIDENTS_STARTUP_DELAY_SECONDS: 120        #After server start, first wakes are spread between this delay...
     RESIDENTS_CATCHUP_WINDOW_SECONDS: 1800      #...and this, since merchants close on shutdown and need reopening.
     RESIDENTS_REQUIRE_HUMAN_ONLINE: true        #Scale to zero: nobody wakes while no human is online (open shops stay open).

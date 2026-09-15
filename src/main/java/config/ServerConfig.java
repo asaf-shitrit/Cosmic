@@ -287,6 +287,11 @@ public class ServerConfig {
     public int RESIDENTS_CATCHUP_WINDOW_SECONDS = 1800;
     public boolean RESIDENTS_REQUIRE_HUMAN_ONLINE = true;
     public int RESIDENTS_DAILY_MESO_CAP = 150000;
+
+    //Ambient Companions - a companion who shows up on their own while a player trains alone.
+    public boolean AMBIENT_COMPANIONS_ENABLED = true;
+    public int AMBIENT_COMPANIONS_DWELL_SECONDS = 3;
+    public int AMBIENT_COMPANIONS_COOLDOWN_MINUTES = 10;
     public int RESIDENTS_MAX_PURCHASES_PER_WAKE = 2;
     public double RESIDENTS_BROWSE_CHANCE = 0.5;
     public int RESIDENTS_MAX_LISTINGS = 8;

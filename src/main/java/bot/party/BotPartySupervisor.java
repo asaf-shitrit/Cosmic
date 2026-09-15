@@ -127,6 +127,26 @@ public final class BotPartySupervisor {
         return evaluate(owner).reason;
     }
 
+    /** How many companions this owner currently has out, whoever asked for them. */
+    public int companionCount(Character owner) {
+        return snapshotOf(owner.getId()).size();
+    }
+
+    /**
+     * Sends one companion without a player asking for it, and reports whether one actually started.
+     *
+     * <p>{@link #summon} answers with the line a player should be shown, so it says nothing about
+     * whether the request was carried out - and a summon can be refused for reasons that are nobody's
+     * mistake (a full budget, an event instance, a low-level player with no party). A caller acting on
+     * its own, like {@code AmbientCompanionDirector}, needs the difference: an unstarted summon must
+     * not be recorded as "this player has company now".
+     */
+    public boolean summonAmbient(Character owner) {
+        int before = companionCount(owner);
+        summon(owner, 1);
+        return companionCount(owner) > before;
+    }
+
     public String summon(Character owner, int requested) {
         Evaluation eval = evaluate(owner);
         if (eval.capacity <= 0) {

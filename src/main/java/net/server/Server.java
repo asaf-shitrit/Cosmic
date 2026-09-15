@@ -21,6 +21,7 @@
  */
 package net.server;
 
+import bot.ambient.AmbientCompanionDirector;
 import bot.party.BotPartySupervisor;
 import bot.residents.ResidentDirector;
 import client.Character;
@@ -958,6 +959,7 @@ public class Server {
         }
 
         ResidentDirector.startIfEnabled();
+        AmbientCompanionDirector.startIfEnabled();
     }
 
     /**
