@@ -181,6 +181,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.Stack;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -338,8 +339,13 @@ public class Character extends AbstractCharacterObject {
     private Ring marriageRing;
     private int marriageItemid = -1;
     private int partnerId = -1;
-    private final List<Ring> crushRings = new ArrayList<>();
-    private final List<Ring> friendshipRings = new ArrayList<>();
+    // Copy-on-write, and read through sorted copies: every player entering a map reads the rings of
+    // everyone already there (spawnPlayerMapObject -> addRingLook), so several map entries at once
+    // read the same list concurrently. Sorting the shared list in place threw
+    // ConcurrentModificationException from ChangeMapHandler and left the entering character half
+    // moved (seen with three summoned bots taking one portal together).
+    private final List<Ring> crushRings = new CopyOnWriteArrayList<>();
+    private final List<Ring> friendshipRings = new CopyOnWriteArrayList<>();
     private boolean loggedIn = false;
     private boolean useCS;  //chaos scroll upon crafting item.
     private long npcCd;
@@ -4704,8 +4710,7 @@ public class Character extends AbstractCharacterObject {
     }
 
     public List<Ring> getCrushRings() {
-        Collections.sort(crushRings);
-        return crushRings;
+        return crushRings.stream().sorted().toList();
     }
 
     public int getCurrentCI() {
@@ -5051,8 +5056,7 @@ public class Character extends AbstractCharacterObject {
     }
 
     public List<Ring> getFriendshipRings() {
-        Collections.sort(friendshipRings);
-        return friendshipRings;
+        return friendshipRings.stream().sorted().toList();
     }
 
     public int getGender() {
