@@ -140,7 +140,19 @@ public class KpqPlanner implements Planner {
     @Override
     public Action plan(WorldState world, Point selfPosition) {
         int mapChanges = world.getMapChangeCount();
-        if (mapChanges != lastMapChangeCount) {
+        // mapChanges is 0 until the very first SET_FIELD lands, which is NOT guaranteed to have
+        // happened yet the first time plan() is called: BotSession#runGameLoop sets its initial
+        // forceReplan=true before the loop even starts, so this can run on iteration 1 while
+        // SET_FIELD is still in flight. Found live: mapChanges==0 was falling into the "real
+        // transition" branch below (lastMapChangeCount starts at -1, so 0 != -1), computing
+        // newStageIndex = 0 - 2 = -2, which matches none of the phase branches and fell through to
+        // Phase.DONE - permanently, before the bot had even seen its first map. Every later tick then
+        // saw mapChanges go 0 -> 1 and recomputed newStageIndex = 1 - 2 = -1 (a genuine no-op, equal
+        // to the initial stageIndex), so phase never recovered - plan() silently returned Idle forever
+        // and not one packet after login ever reached the server. Guarding on mapChanges > 0 means
+        // the pre-SET_FIELD tick is simply not treated as a transition at all, same as if it had
+        // arrived one tick earlier.
+        if (mapChanges > 0 && mapChanges != lastMapChangeCount) {
             lastMapChangeCount = mapChanges;
             // mapChanges: 1 = just landed in the recruit map (login's own SET_FIELD), 2 = stage 1,
             // 3 = stage 2, ... 6 = stage 5. Every KPQ warp is a forward step, so this simple mapping
