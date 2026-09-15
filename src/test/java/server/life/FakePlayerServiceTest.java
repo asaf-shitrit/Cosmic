@@ -9,6 +9,8 @@ import java.awt.Point;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -99,6 +101,130 @@ class FakePlayerServiceTest {
             assertTrue(spot.x >= MAP_MIN_X && spot.x < MAP_MAX_X,
                     activity + " should still be scattered over the map, was at x=" + spot.x);
         }
+    }
+
+    /**
+     * A map with a roof, a platform and the ground, the way a real field is built: several stacked
+     * surfaces, each covering only part of the width. {@code getGroundBelow} answers with the highest
+     * surface at or below the point it is given, and throws when there is none - which is what
+     * {@code MapleMap} does, since it dereferences the foothold it looked for.
+     *
+     * @param roofX2 how far the roof reaches from x=0; it is a band along the top, not the whole map
+     */
+    private static MapleMap stackedMap(int roofX2, int platformX1, int platformX2, int roofY, int platformY) {
+        FootholdTree footholds = mock(FootholdTree.class);
+        when(footholds.getMinDropX()).thenReturn(MAP_MIN_X);
+        when(footholds.getMaxDropX()).thenReturn(MAP_MAX_X);
+        when(footholds.getY1()).thenReturn(roofY);          // highest surface, as MapleMap reports it
+
+        MapleMap map = mock(MapleMap.class);
+        when(map.getFootholds()).thenReturn(footholds);
+        when(map.getGroundBelow(any(Point.class))).thenAnswer(call -> {
+            Point from = call.getArgument(0);
+            int looking = from.y - 14;                       // getGroundBelow looks 14px above its point
+            Integer surface = null;
+            if (from.x <= roofX2 && roofY >= looking) {
+                surface = roofY;
+            }
+            if (surface == null && from.x >= platformX1 && from.x <= platformX2 && platformY >= looking) {
+                surface = platformY;
+            }
+            if (surface == null && GROUND_Y >= looking) {
+                surface = GROUND_Y;
+            }
+            if (surface == null) {
+                throw new IllegalStateException("no foothold below " + from);
+            }
+            return new Point(from.x, surface - 1);
+        });
+        when(map.findClosestSpawnpoint(any(Point.class))).thenAnswer(call -> {
+            SpawnPoint spawn = mock(SpawnPoint.class);
+            when(spawn.getPosition()).thenAnswer(ignored -> call.getArgument(0));
+            return spawn;
+        });
+        return map;
+    }
+
+    /**
+     * The bug this guards: placement used to ask for the map's highest foothold, which on a stacked
+     * map is a roof or an upper floor. Fake players were left standing in the sky above the map they
+     * were meant to populate.
+     */
+    @Test
+    void townTrafficStandsOnTheGroundNotOnARoof() {
+        MapleMap map = stackedMap(400, 500, 800, MAP_TOP_Y, 250);
+
+        for (FakePlayerActivity activity : new FakePlayerActivity[]{
+                FakePlayerActivity.TRAVELLING, FakePlayerActivity.VENDING, FakePlayerActivity.BROWSING,
+                FakePlayerActivity.WAITING, FakePlayerActivity.CLEARING}) {
+            Point spot = placement(map, activity);
+            assertEquals(GROUND_Y - 1, spot.y,
+                    activity + " should stand on the ground, was at y=" + spot.y);
+        }
+    }
+
+    /** A flying mob's spawn point is mid-air; its grinder belongs on the floor under it. */
+    @Test
+    void grindersStandOnTheFloorBeneathTheirSpawnPoint() {
+        MapleMap map = stackedMap(0, 150, 350, MAP_TOP_Y, 250);
+        when(map.findClosestSpawnpoint(any(Point.class))).thenAnswer(call -> {
+            SpawnPoint spawn = mock(SpawnPoint.class);
+            when(spawn.getPosition()).thenReturn(new Point(200, 220));   // 30px above the platform
+            return spawn;
+        });
+
+        Point spot = placement(map, FakePlayerActivity.GRINDING);
+
+        assertEquals(200, spot.x, "a grinder stands at the spawn point's x");
+        assertEquals(249, spot.y, "and on the platform under it, not in the air and not on the ground");
+    }
+
+    @Test
+    void restersSitOnTheGroundToo() {
+        MapleMap map = stackedMap(400, 500, 800, MAP_TOP_Y, 250);
+
+        Point spot = placement(map, FakePlayerActivity.RESTING);
+
+        assertEquals(GROUND_Y - 1, spot.y, "a rester sits on the ground, was at y=" + spot.y);
+    }
+
+    @Test
+    void aWalkerStaysOnThePlatformItIsOn() {
+        MapleMap map = stackedMap(0, 150, 800, MAP_TOP_Y, 250);
+
+        FakePlayerService.WalkStep step = FakePlayerService.getInstance()
+                .nextStep(map, new Point(200, 249), 600);   // on the platform, heading further along it
+
+        assertEquals(340, step.position().x, "a walker takes one full step toward its destination");
+        assertEquals(249, step.position().y, "and stays on the platform it is standing on");
+        assertFalse(step.dropping(), "walking along a platform is not a drop");
+    }
+
+    /**
+     * The case that matters for realism: a walker that runs out of platform drops onto the floor
+     * underneath rather than gliding down to it over a whole walk tick.
+     */
+    @Test
+    void aWalkerDropsOntoTheFloorWhenItsPlatformEnds() {
+        MapleMap map = stackedMap(0, 150, 350, MAP_TOP_Y, 250);
+
+        FakePlayerService.WalkStep step = FakePlayerService.getInstance()
+                .nextStep(map, new Point(340, 249), 600);   // platform ends at x=350
+
+        assertTrue(step.dropping(), "running out of platform with a floor 50px below is a drop");
+        assertEquals(340, step.position().x, "a drop goes straight down, it is not also a step sideways");
+        assertEquals(GROUND_Y - 1, step.position().y);
+        assertTrue(step.durationMs() < 1000, "a fall is quick, not a walk: was " + step.durationMs() + "ms");
+    }
+
+    @Test
+    void aWalkerGivesUpRatherThanDroppingTooFar() {
+        MapleMap map = stackedMap(0, 150, 350, 20, 50);     // a platform 250px above the ground
+
+        FakePlayerService.WalkStep step = FakePlayerService.getInstance()
+                .nextStep(map, new Point(340, 49), 600);
+
+        assertNull(step, "a 250px drop is a cliff, not a ledge - the walker should pick somewhere else");
     }
 
     /**

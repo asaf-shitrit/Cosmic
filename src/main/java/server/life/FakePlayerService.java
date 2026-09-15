@@ -76,6 +76,27 @@ public class FakePlayerService {
     private static final short SLOT_SHOES = 7;
     private static final short SLOT_WEAPON = 11;
 
+    /**
+     * How far above or below a walker's current surface the next one may be for the step to still
+     * count as walking. A sloping foothold moves a few pixels per step; a ledge moves hundreds, and
+     * stepping straight onto one is a teleport the client draws as a slide through the floor.
+     */
+    private static final int WALK_SLOPE_TOLERANCE_PIXELS = 12;
+
+    /**
+     * How far a walker may drop in one hop, and over what interval. A real client falls fast, so the
+     * hop carries its own short duration instead of {@link #WALK_TICK_MS} - with the walk's interval it
+     * would read as floating down rather than dropping off the edge.
+     */
+    private static final int MAX_HOP_DOWN_PIXELS = 240;
+    private static final int HOP_TICK_MS = 400;
+
+    /**
+     * Safety valve for {@link #surfacesAt}: real maps stack a handful of floors, not dozens. Without a
+     * bound, a map whose foothold data answers the same point twice would loop forever.
+     */
+    private static final int MAX_SURFACES_PER_COLUMN = 12;
+
     private static final int[] MALE_FACES = {20000, 20001, 20002, 20003, 20004, 20005, 20006, 20007};
     private static final int[] FEMALE_FACES = {21000, 21001, 21002, 21003, 21004, 21005, 21006, 21007};
     private static final int[] MALE_HAIRS = {30000, 30020, 30030, 30040, 30050, 30060, 30070, 30080};
@@ -306,37 +327,42 @@ public class FakePlayerService {
      * should be reaching for.
      */
     Point chooseSpawnPosition(MapleMap map, FakePlayerActivity activity, int minX, int maxX) {
-        FootholdTree footholds = map.getFootholds();
         int x = minX + Randomizer.nextInt(Math.max(1, maxX - minX));
 
         if (activity == FakePlayerActivity.GRINDING) {
-            SpawnPoint spawn = nearestSpawnPoint(map, new Point(x, footholds.getY1()));
+            SpawnPoint spawn = nearestSpawnPoint(map, new Point(x, map.getFootholds().getY1()));
             if (spawn != null) {
-                // Start from the spawn point's own coordinates rather than the top of the map:
-                // on a map with stacked floors, snapping from the top drops the fake player onto
-                // whatever platform is highest there, which is usually not the one with the mobs.
-                return spawn.getPosition();
+                // Stand on the floor the mobs are on, not at the mob's own height: a flying mob's
+                // spawn point is mid-air (Aqua Road, Crossroad of Time), and the nearest surface to
+                // it is the platform underneath.
+                Point surface = surfaceNearest(map, spawn.getPosition().x, spawn.getPosition().y);
+                if (surface != null) {
+                    return surface;
+                }
             }
         } else if (activity == FakePlayerActivity.RESTING) {
             return chooseRestingSpot(map, minX, maxX);
         }
 
-        return new Point(x, footholds.getY1());
+        // Everyone else stands on the ground. The map's own highest foothold - which is what this
+        // used to return - is a roof or a platform several floors up, and standing on it is exactly
+        // what put fake players in the sky.
+        Point ground = lowestSurface(map, x);
+        return ground != null ? ground : new Point(x, map.getFootholds().getY1());
     }
 
     /**
      * A spot for a resting fake player. Of a handful of sampled spots the one whose nearest mob
      * spawn point is furthest away wins, so it reads as sitting out of the mobs' way, e.g. at the
-     * edge of a platform. On a map with no spawn points any spot will do.
+     * edge of a map. On a map with no spawn points any spot will do.
      */
     private Point chooseRestingSpot(MapleMap map, int minX, int maxX) {
-        FootholdTree footholds = map.getFootholds();
         int width = Math.max(1, maxX - minX);
-        Point best = new Point(minX + Randomizer.nextInt(width), footholds.getY1());
+        Point best = null;
         double bestDistance = -1;
 
         for (int i = 0; i < RESTING_SAMPLE_COUNT; i++) {
-            Point candidate = groundBelow(map, new Point(minX + Randomizer.nextInt(width), footholds.getY1()));
+            Point candidate = lowestSurface(map, minX + Randomizer.nextInt(width));
             if (candidate == null) {
                 continue;
             }
@@ -348,7 +374,7 @@ public class FakePlayerService {
                 best = candidate;
             }
         }
-        return best;
+        return best != null ? best : new Point(minX + Randomizer.nextInt(width), map.getFootholds().getY1());
     }
 
     /**
@@ -441,13 +467,9 @@ public class FakePlayerService {
         }
 
         boolean left = remaining < 0;
-        int step = Math.min(STEP_PIXELS, Math.abs(remaining));
-        int targetX = clampToMap(map, current.x + (left ? -step : step));
-
-        Point destination = groundBelow(map, new Point(targetX, current.y));
-
-        if (destination == null) {  // walked off the end of a foothold
-            // Can't get there from here; give up on this destination and pick another.
+        WalkStep decision = nextStep(map, current, wanderer.destinationX);
+        if (decision == null) {
+            // Nothing to walk to and nothing to drop onto: give up on this destination and pick another.
             wanderer.destinationX = chooseDestination(wanderer);
             wanderer.dwellTicks = 1;
             fakePlayer.faceStanding();
@@ -455,9 +477,47 @@ public class FakePlayerService {
             return;
         }
 
-        fakePlayer.faceWalking(left);
-        fakePlayer.setPosition(destination);
-        broadcastMove(map, fakePlayer, destination, WALK_TICK_MS);
+        if (decision.dropping()) {
+            fakePlayer.faceStanding();          // nobody walks through a fall
+        } else {
+            fakePlayer.faceWalking(left);
+        }
+        fakePlayer.setPosition(decision.position());
+        broadcastMove(map, fakePlayer, decision.position(), decision.durationMs());
+    }
+
+    /**
+     * Where a walker's next step takes it, or null when the platform it stands on cannot get there.
+     *
+     * @param position   where the fake player will be after this step
+     * @param durationMs how long the client should take to get there
+     * @param dropping   true when this step is a drop off a ledge rather than a walk along it
+     */
+    record WalkStep(Point position, int durationMs, boolean dropping) {}
+
+    /**
+     * Decides one step of a walk. Package-private so the ledge cases can be tested against a stubbed
+     * map: a drop only happens when a walker runs out of platform with another one underneath, which
+     * is rare enough in a live run that seeing one is a matter of luck.
+     */
+    WalkStep nextStep(MapleMap map, Point current, int destinationX) {
+        boolean left = destinationX < current.x;
+        int step = Math.min(STEP_PIXELS, Math.abs(destinationX - current.x));
+        int targetX = clampToMap(map, current.x + (left ? -step : step));
+
+        Point ahead = surfaceNearest(map, targetX, current.y);
+        if (ahead != null && Math.abs(ahead.y - current.y) <= WALK_SLOPE_TOLERANCE_PIXELS) {
+            return new WalkStep(ahead, WALK_TICK_MS, false);
+        }
+
+        // The platform ends here. Drop onto the floor below if there is one close enough - that is
+        // how a player leaves a ledge, and the only vertical movement a fake player ever makes.
+        Point below = surfaceNearest(map, current.x, current.y + MAX_HOP_DOWN_PIXELS);
+        if (below != null && below.y > current.y + WALK_SLOPE_TOLERANCE_PIXELS
+                && below.y - current.y <= MAX_HOP_DOWN_PIXELS) {
+            return new WalkStep(below, HOP_TICK_MS, true);
+        }
+        return null;
     }
 
     /**
@@ -538,13 +598,60 @@ public class FakePlayerService {
         return ground == null ? null : map.findClosestSpawnpoint(ground);
     }
 
-    /** The walkable ground under {@code from}, or null if there is no foothold below it. */
+    /**
+     * The walkable ground under {@code from}, or null if there is no foothold below it.
+     *
+     * <p>{@code MapleMap.getGroundBelow} dereferences the foothold it looked for, so it throws rather
+     * than returning null when a column has nothing below it - the caller has to catch that.
+     */
     private static Point groundBelow(MapleMap map, Point from) {
         try {
             return map.getGroundBelow(from);
         } catch (Exception e) {
             return null;    // no foothold below the requested point
         }
+    }
+
+    /**
+     * Every walkable surface at {@code x}, highest first, read out of the map's own footholds.
+     *
+     * <p>{@code MapleMap} answers "what is under this point" one query at a time and exposes no list
+     * of footholds, so a column is walked by asking again from just below the last answer. This is what
+     * lets placement tell a roof from the ground, and what keeps a walker on the platform it is
+     * already on instead of snapping to whatever is nearest in a straight line.
+     */
+    private static List<Point> surfacesAt(MapleMap map, int x) {
+        List<Point> surfaces = new ArrayList<>();
+        Point from = new Point(x, map.getFootholds().getY1());
+
+        while (surfaces.size() < MAX_SURFACES_PER_COLUMN) {
+            Point surface = groundBelow(map, from);
+            if (surface == null || (!surfaces.isEmpty() && surface.y <= surfaces.get(surfaces.size() - 1).y)) {
+                break;      // nothing below the last surface: the map ends here
+            }
+            surfaces.add(surface);
+            // getGroundBelow looks 14 pixels above the point it is handed, so stepping 16 below the
+            // surface just found is what makes the next query miss it and find the floor under it.
+            from = new Point(x, surface.y + 16);
+        }
+        return surfaces;
+    }
+
+    /** The surface at {@code x} closest to {@code y}, or null if that column has no foothold at all. */
+    private static Point surfaceNearest(MapleMap map, int x, int y) {
+        Point best = null;
+        for (Point surface : surfacesAt(map, x)) {
+            if (best == null || Math.abs(surface.y - y) < Math.abs(best.y - y)) {
+                best = surface;
+            }
+        }
+        return best;
+    }
+
+    /** The lowest surface at {@code x}: the ground everyone walks on. */
+    private static Point lowestSurface(MapleMap map, int x) {
+        List<Point> surfaces = surfacesAt(map, x);
+        return surfaces.isEmpty() ? null : surfaces.get(surfaces.size() - 1);
     }
 
     /**
