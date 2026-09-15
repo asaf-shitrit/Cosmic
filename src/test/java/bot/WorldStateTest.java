@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.awt.Point;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorldStateTest {
@@ -40,6 +41,49 @@ class WorldStateTest {
         return p;
     }
 
+    /**
+     * The shape of PacketCreator.spawnPlayerMapObject that {@code WorldState} walks: the leading fields
+     * matter (level, name, guild name), everything between is filler the bot skips without looking at it.
+     */
+    private static OutPacket spawnPlayer(int charId, String name, Point position) {
+        OutPacket p = OutPacket.create(SendOpcode.SPAWN_PLAYER);
+        p.writeInt(charId);
+        p.writeByte(30);                  // level
+        p.writeString(name);
+        p.writeString("");                // guild name, empty for a guildless character
+        p.writeBytes(new byte[6]);        // guild crest
+        p.writeBytes(new byte[8]);        // buff mask block
+        p.writeInt(0);                    // morph flag
+        p.writeInt(0);                    // buff mask, high half
+        p.writeBytes(new byte[4]);
+        p.writeBytes(new byte[108]);      // character look
+        p.writeBytes(new byte[2]);
+        p.writeBytes(new byte[11]);
+        p.writeByte(0xFF);                // empty equip list
+        p.writeByte(0xFF);                // empty equip list
+        p.writeBytes(new byte[16]);
+        p.writeBytes(new byte[12]);
+        p.writePos(position);
+        return p;
+    }
+
+    /** PacketCreator.removePlayerFromMap: int charId. */
+    private static OutPacket removedPlayer(int charId) {
+        OutPacket p = OutPacket.create(SendOpcode.REMOVE_PLAYER_FROM_MAP);
+        p.writeInt(charId);
+        return p;
+    }
+
+    /** PacketCreator.getChatText: int cidfrom, bool gm, string text (the trailing show byte is not read). */
+    private static OutPacket chat(int from, String text) {
+        OutPacket p = OutPacket.create(SendOpcode.CHATTEXT);
+        p.writeInt(from);
+        p.writeBool(false);
+        p.writeString(text);
+        p.writeByte(0);                   // show
+        return p;
+    }
+
     @Test
     void aDropSomeoneElsePicksUpLeavesTheMap() {
         WorldState world = new WorldState(1);
@@ -47,5 +91,66 @@ class WorldStateTest {
         assertEquals(1, world.getItemDrops().size());
         feed(world, pickedUp(500, 2));
         assertTrue(world.getItemDrops().isEmpty(), "drops left: " + world.getItemDrops());
+    }
+
+    @Test
+    void aChatLineIsRememberedWithTheNameOfWhoSaidIt() {
+        WorldState world = new WorldState(1);
+        feed(world, spawnPlayer(2, "humanpal", new Point(100, 200)));
+
+        feed(world, chat(2, "hey Marigold"));
+
+        WorldState.ChatSince since = world.chatSince(0);
+        assertEquals(1, since.lines().size(), "lines: " + since.lines());
+        WorldState.ChatLine line = since.lines().get(0);
+        assertEquals("humanpal", line.speaker(), "a bot that cannot name the speaker cannot tell if it was addressed");
+        assertEquals("hey Marigold", line.text());
+        assertEquals("humanpal", world.nameOf(2));
+    }
+
+    @Test
+    void theSameChatIsNeverHandedBackTwice() {
+        WorldState world = new WorldState(1);
+        feed(world, spawnPlayer(2, "humanpal", new Point(100, 200)));
+        feed(world, chat(2, "first"));
+
+        WorldState.ChatSince consumed = world.chatSince(0);
+
+        assertTrue(world.chatSince(consumed.latestSeq()).lines().isEmpty(),
+                "a planner polls every tick - re-reading the same line would answer it forever");
+        feed(world, chat(2, "second"));
+        assertEquals(1, world.chatSince(consumed.latestSeq()).lines().size());
+    }
+
+    @Test
+    void aBotsOwnChatIsNotHeardBack() {
+        WorldState world = new WorldState(1);
+        feed(world, spawnPlayer(2, "humanpal", new Point(100, 200)));
+
+        feed(world, chat(1, "my own line"));          // the server broadcasts our chat to our own map too
+
+        assertTrue(world.chatSince(0).lines().isEmpty(), "a bot answering itself would loop forever");
+    }
+
+    @Test
+    void chatFromSomeoneWhoseSpawnNeverDecodedFallsBackToTheirId() {
+        WorldState world = new WorldState(1);
+
+        feed(world, chat(7, "hello?"));
+
+        assertEquals("#7", world.chatSince(0).lines().get(0).speaker());
+    }
+
+    @Test
+    void leavingTheMapForgetsWhoWasThereAndWhatWasSaid() {
+        WorldState world = new WorldState(1);
+        feed(world, spawnPlayer(2, "humanpal", new Point(100, 200)));
+        feed(world, chat(2, "see you around"));
+
+        feed(world, removedPlayer(2));
+        world.onMapChanged();
+
+        assertNull(world.nameOf(2));
+        assertTrue(world.chatSince(0).lines().isEmpty(), "chat said on the map we left is not something to answer");
     }
 }

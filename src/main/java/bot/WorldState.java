@@ -5,8 +5,12 @@ import net.packet.InPacket;
 
 import java.awt.Point;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -42,6 +46,17 @@ public class WorldState {
     /** The most recent {@code NPC_TALK} this bot received, not yet necessarily responded to. */
     public record NpcTalk(int npcId, int msgType, String text) {}
 
+    /**
+     * One line of general chat this bot saw broadcast on its map.
+     *
+     * <p>{@code speaker} is the name the server's own {@code SPAWN_PLAYER} packet gave for
+     * {@code speakerId}, falling back to {@code #<id>} when that player's spawn didn't decode - the id
+     * is always authoritative, the name is a convenience for prompts and logs. Nothing here says
+     * whether the speaker is a human: that is a policy question (see {@link #accept}), and this class
+     * deliberately does not answer it.
+     */
+    public record ChatLine(int seq, int speakerId, String speaker, String text) {}
+
     private record EtcSlotEntry(int itemId, int quantity) {}
 
     /**
@@ -65,9 +80,29 @@ public class WorldState {
     /**
      * charId -> the last position the server holds for that player, from {@code SPAWN_PLAYER} and
      * then every {@code MOVE_PLAYER}. A player can be present in {@link #otherPlayers} without an
-     * entry here if its spawn packet didn't decode (see {@link #readSpawnPlayerPosition}).
+     * entry here if its spawn packet didn't decode (see {@link #readSpawnPlayer}).
      */
     private final Map<Integer, Point> playerPositions = new ConcurrentHashMap<>();
+
+    /**
+     * charId -> the name {@code SPAWN_PLAYER} gave, so a planner can tell who is talking and who it is
+     * standing next to. Without this a bot can hear chat but cannot tell whether it was addressed.
+     */
+    private final Map<Integer, String> playerNames = new ConcurrentHashMap<>();
+
+    /** How many chat lines {@link #chatSince} can hand back. A planner only ever answers what just landed. */
+    private static final int CHAT_LOG_CAPACITY = 16;
+
+    /**
+     * The last few lines of general chat, newest last, and the sequence number of the newest one.
+     *
+     * <p>Bounded on purpose: a planner only ever reacts to what just arrived, and an unbounded log of
+     * everything said in a town would grow for as long as the bot stands there. Guarded by its own
+     * monitor rather than being a concurrent collection, because eviction and the sequence counter have
+     * to move together.
+     */
+    private final Deque<ChatLine> chatLog = new ArrayDeque<>();
+    private int chatSeq;
     private final Map<Integer, ItemDrop> itemDrops = new ConcurrentHashMap<>();
 
     /** ETC inventory slot -> (itemId, quantity), kept in sync from {@code INVENTORY_OPERATION}. */
@@ -155,15 +190,19 @@ public class WorldState {
             if (charId == selfCharId) {
                 return null;
             }
-            Point pos = readSpawnPlayerPosition(p);
-            if (pos != null) {
-                playerPositions.put(charId, pos);
+            SpawnPlayer spawn = readSpawnPlayer(p);
+            if (spawn.name() != null) {
+                playerNames.put(charId, spawn.name());
+            }
+            if (spawn.position() != null) {
+                playerPositions.put(charId, spawn.position());
             }
             if (otherPlayers.put(charId, Boolean.TRUE) != null) {
                 return null;
             }
             changeVersion.incrementAndGet();
-            return "player " + charId + " entered the map at " + (pos == null ? "(undecoded)" : pointToString(pos));
+            return "player " + charId + " (" + spawn.name() + ") entered the map at "
+                    + (spawn.position() == null ? "(undecoded)" : pointToString(spawn.position()));
         }
         if (opcode == SendOpcode.MOVE_PLAYER.getValue()) {
             int charId = p.readInt();
@@ -179,11 +218,15 @@ public class WorldState {
         if (opcode == SendOpcode.REMOVE_PLAYER_FROM_MAP.getValue()) {
             int charId = p.readInt();
             playerPositions.remove(charId);
+            playerNames.remove(charId);
             if (otherPlayers.remove(charId) == null) {
                 return null;
             }
             changeVersion.incrementAndGet();
             return "player " + charId + " left the map";
+        }
+        if (opcode == SendOpcode.CHATTEXT.getValue()) {
+            return acceptChat(p);
         }
         if (opcode == SendOpcode.NPC_TALK.getValue()) {
             return acceptNpcTalk(p);
@@ -384,10 +427,25 @@ public class WorldState {
      * server writes its position 42px higher (it drops onto the foothold client-side) - close enough
      * for following, not corrected here.
      */
-    private static Point readSpawnPlayerPosition(InPacket p) {
+    /**
+     * What a {@code SPAWN_PLAYER} tells this bot about someone else: who they are, and where they are
+     * if the position decode got that far.
+     *
+     * @param name     the player's name, or null if even that much didn't decode
+     * @param position null when the packet under-read past its end (see {@link #readSpawnPlayer})
+     */
+    private record SpawnPlayer(String name, Point position) {}
+
+    /**
+     * Reads the name and position out of a {@code SPAWN_PLAYER}. The name is captured before the long
+     * fragile tail, so a differently-shaped spawn packet costs this bot the position but not the
+     * ability to know who is on its map.
+     */
+    private static SpawnPlayer readSpawnPlayer(InPacket p) {
+        String name = null;
         try {
             p.readByte();
-            p.readString();
+            name = p.readString();
             p.readString();
             p.skip(6);
             p.skip(4 + 2 + 1 + 1);
@@ -406,10 +464,42 @@ public class WorldState {
             skipEquipList(p);
             p.skip(4 + 3 * 4);
             p.skip(3 * 4);
-            return p.readPos();
+            return new SpawnPlayer(name, p.readPos());
         } catch (RuntimeException e) {
-            return null;             // under-read past the end of a differently-shaped packet
+            return new SpawnPlayer(name, null);   // under-read past the end of a differently-shaped packet
         }
+    }
+
+    /**
+     * Records a {@code CHATTEXT} broadcast. The layout is the server's own
+     * {@code PacketCreator.getChatText}: {@code int cidfrom}, {@code bool gm}, {@code string text}. The
+     * trailing {@code show} byte is never a risk to skip - a packet carries its own length, so
+     * under-reading one here cannot desync the stream.
+     *
+     * <p>This class is perception only, so it records every line including other bots' and keeps no
+     * opinion about which are worth answering: whether a line is addressed to this bot, and whether its
+     * speaker is human, are decisions for the planner that reads {@link #chatSince} - the same
+     * {@code WorldState} serves companions, FM residents and KPQ bots, which want different answers.
+     *
+     * <p>This bot's own lines are dropped: the server broadcasts a player's chat back to their own map,
+     * and a bot that reacted to itself would answer its own questions forever.
+     */
+    private String acceptChat(InPacket p) {
+        int speakerId = p.readInt();
+        p.readByte();                  // GM flag
+        String text = p.readString();
+        if (speakerId == selfCharId) {
+            return null;
+        }
+        String speaker = playerNames.getOrDefault(speakerId, "#" + speakerId);
+        synchronized (chatLog) {
+            chatLog.addLast(new ChatLine(++chatSeq, speakerId, speaker, text));
+            while (chatLog.size() > CHAT_LOG_CAPACITY) {
+                chatLog.removeFirst();
+            }
+        }
+        changeVersion.incrementAndGet();
+        return "chat from " + speaker + ": " + text;
     }
 
     /** {@code BuffStat.COMBO} is bit 53, i.e. this bit of the high 32-bit half of the mask. */
@@ -707,6 +797,10 @@ public class WorldState {
         npcs.clear();
         monsters.clear();
         itemDrops.clear();
+        playerNames.clear();
+        synchronized (chatLog) {
+            chatLog.clear();       // said on the map this bot just left; nothing to answer now
+        }
         // The server never sends REMOVE_PLAYER_FROM_MAP to the player who is leaving, only to those
         // staying, so everyone seen on the old map would otherwise linger here forever.
         otherPlayers.clear();
@@ -805,6 +899,39 @@ public class WorldState {
     /** Monotonically increasing counter, bumped on every tracked change. Cheap "did anything happen" check. */
     public int getChangeVersion() {
         return changeVersion.get();
+    }
+
+    /**
+     * Every chat line younger than {@code sinceSeq}, oldest first, plus the newest sequence number seen.
+     *
+     * <p>A planner keeps the last sequence it consumed and asks again next tick: {@code chatSince} with
+     * the value from the previous call. Nothing is returned - and nothing is allocated - when no chat
+     * arrived, which is the usual case, so polling this every tick is free.
+     */
+    public ChatSince chatSince(int sinceSeq) {
+        synchronized (chatLog) {
+            if (sinceSeq >= chatSeq) {
+                return new ChatSince(List.of(), chatSeq);
+            }
+            List<ChatLine> fresh = new ArrayList<>();
+            for (ChatLine line : chatLog) {
+                if (line.seq() > sinceSeq) {
+                    fresh.add(line);
+                }
+            }
+            return new ChatSince(fresh, chatSeq);
+        }
+    }
+
+    /**
+     * @param lines     chat newer than the sequence the caller last consumed
+     * @param latestSeq the sequence to pass to the next {@link #chatSince} call
+     */
+    public record ChatSince(List<ChatLine> lines, int latestSeq) {}
+
+    /** The name {@code SPAWN_PLAYER} gave for {@code charId}, or null if that player's spawn didn't decode. */
+    public String nameOf(int charId) {
+        return playerNames.get(charId);
     }
 
     private static String pointToString(Point p) {
