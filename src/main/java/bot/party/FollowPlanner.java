@@ -51,6 +51,19 @@ public class FollowPlanner implements Planner {
      */
     private static final long PORTAL_STEP_MS = 400;
     private static final long PORTAL_RETRY_MS = 1500;
+    /**
+     * Portal uses toward one destination before giving up on it (a quest-gated or scripted portal can
+     * refuse forever). After that the bot stops sending CHANGE_MAP for that destination, which is what
+     * lets the supervisor's catch-up warp run without racing one - see {@code BotPartySupervisor#catchUp}.
+     */
+    private static final int MAX_PORTAL_ATTEMPTS = 4;
+    /**
+     * No portal travel until this long after first entering the world, unless the bot has already been
+     * moved again by then. The supervisor warps a freshly logged-in bot onto its owner within a second
+     * or two; a bot that rejoins with party membership still attached would otherwise know its owner's
+     * map immediately and could be walking through a portal at the moment that warp lands.
+     */
+    private static final long LOGIN_TRAVEL_DELAY_MS = 10_000;
 
     private final int ownerCharId;
     private final String ownerName;
@@ -63,6 +76,10 @@ public class FollowPlanner implements Planner {
     private long lastMoveAt;
     private long lastPortalActionAt;
     private boolean portalApproached;
+    private long firstEnteredAt;
+    /** (bot map, destination map) the attempt count below applies to. */
+    private long portalAttemptKey;
+    private int portalAttempts;
 
     /**
      * @param slot 0-based index among the owner's bots, deciding which side of the owner and how far
@@ -82,6 +99,9 @@ public class FollowPlanner implements Planner {
         if (world.getMapChangeCount() != lastMapChangeCount) {
             lastMapChangeCount = world.getMapChangeCount();
             mapArrivedAt = now;
+            if (firstEnteredAt == 0) {
+                firstEnteredAt = now;
+            }
             portalApproached = false;
             arrivalPosition = MapPortals.byId(world.getSelfMapId(), world.getSelfSpawnPortalId())
                     .map(MapPortals.PortalInfo::position).orElse(null);
@@ -99,13 +119,15 @@ public class FollowPlanner implements Planner {
         Point current = selfPosition != null ? selfPosition : arrivalPosition;
         Point ownerPos = world.getPlayerPosition(ownerCharId);
         if (ownerPos != null) {
+            portalAttemptKey = 0;       // reunited: a later trip to the same map gets a fresh attempt budget
             return followOnMap(now, current, ownerPos);
         }
 
         WorldState.PartyMember owner = world.getPartyMember(ownerCharId);
         int selfMap = world.getSelfMapId();
         if (owner != null && owner.channel() >= 0 && owner.mapId() > 0 && selfMap > 0 && owner.mapId() != selfMap) {
-            return travelToward(now, selfMap, owner.mapId());
+            boolean justLoggedIn = lastMapChangeCount <= 1 && now - firstEnteredAt < LOGIN_TRAVEL_DELAY_MS;
+            return justLoggedIn ? new Action.Idle() : travelToward(now, selfMap, owner.mapId());
         }
         return new Action.Idle();
     }
@@ -143,6 +165,14 @@ public class FollowPlanner implements Planner {
         if (portal.isEmpty()) {
             return new Action.Idle();
         }
+        long key = ((long) selfMap << 32) | (ownerMap & 0xFFFFFFFFL);
+        if (key != portalAttemptKey) {
+            portalAttemptKey = key;
+            portalAttempts = 0;
+        }
+        if (portalAttempts >= MAX_PORTAL_ATTEMPTS && !portalApproached) {
+            return new Action.Idle();       // given up; the supervisor's catch-up warp takes over
+        }
         if (!portalApproached) {
             if (now - lastPortalActionAt < PORTAL_RETRY_MS) {
                 return new Action.Idle();
@@ -156,6 +186,7 @@ public class FollowPlanner implements Planner {
         }
         lastPortalActionAt = now;
         portalApproached = false;   // re-approach on a retry, in case something moved us off the portal
+        portalAttempts++;
         return new Action.UsePortal(portal.get().name());
     }
 }

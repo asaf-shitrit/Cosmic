@@ -30,7 +30,10 @@ final class BotAccounts {
     /**
      * {@code "Shu" + ownerCharId + "b" + (slot + 1)}, e.g. {@code Shu1234b1}. Deterministic, so a
      * player's bots keep the same characters from one summon to the next, and alphanumeric, which
-     * {@code Character.canCreateChar} requires. Owner ids up to 7 digits fit in 12 characters.
+     * {@code Character.canCreateChar} requires. Owner ids up to 7 digits fit in 12 characters. Letters
+     * are only "Shu" and "b" around digits, so no name can contain an entry of the substring
+     * blocklist {@code Character.BLOCKED_NAMES} (a blocked name gets no reply at all and the login
+     * would hang until the supervisor's login deadline).
      *
      * @return the name, or {@code null} if this owner's id is too long to fit
      */

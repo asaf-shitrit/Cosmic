@@ -1,5 +1,6 @@
 package bot.party;
 
+import bot.MapPortals;
 import client.Character;
 import net.server.PlayerStorage;
 import net.server.Server;
@@ -46,9 +47,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p><b>Placement.</b> A bot logs in wherever its character last was (a new one on Maple Island), so
  * the watchdog warps it to its owner once it is in the world, then invites it. After that the bot
- * follows on its own ({@link FollowPlanner}); only if it has been on a different map from its owner for
- * {@link #CATCH_UP_AFTER_MS} - the owner used something other than an adjacent portal - does the
- * watchdog warp it again. Neither warp is done into an event instance: a bot isn't registered to it.
+ * follows on its own ({@link FollowPlanner}); only if it is left on another map (the owner used a
+ * scroll, taxi or NPC rather than an adjacent portal) does the watchdog warp it again - see
+ * {@link #catchUp} for how that avoids racing the bot's own portal use. Neither warp is done into an
+ * event instance: a bot isn't registered to it.
  *
  * <p><b>Locking.</b> The registry is guarded by {@code this}, and nothing that touches game state
  * (parties, maps, the database) runs while holding it: NPC scripts call in on a client's thread, and
@@ -72,6 +74,7 @@ public final class BotPartySupervisor {
     private static final long INVITE_RETRY_MS = 5000;
     private static final int MAX_INVITES = 3;
     private static final long CATCH_UP_AFTER_MS = 8000;
+    private static final long CATCH_UP_GIVE_UP_MS = 30_000;
 
     private static BotPartySupervisor instance;
 
@@ -300,7 +303,9 @@ public final class BotPartySupervisor {
         PlayerStorage storage = Server.getInstance().getWorld(bot.worldId).getPlayerStorage();
         Character owner = storage.getCharacterById(bot.ownerId);
         if (owner == null || !owner.isLoggedinWorld()) {
-            bot.requestStop("owner logged out");
+            // A channel change also lands here first: Client#changeChannel marks the owner away from
+            // the world before the new channel ever sees them.
+            bot.requestStop("owner logged out or changed channel");
             return;
         }
         if (owner.getClient().getChannel() != bot.channel) {
@@ -308,21 +313,30 @@ public final class BotPartySupervisor {
             return;
         }
 
-        if (bot.charId < 0) {
+        Character self = bot.charId < 0 ? null : storage.getCharacterById(bot.charId);
+        boolean inWorld = self != null && self.isLoggedinWorld();
+        if (!bot.placed && !inWorld) {
+            // Covers both a login that hangs and one where the channel silently never loads the
+            // character after PLAYER_LOGGEDIN (seen live: the bot sat connected with no SET_FIELD).
             if (now - bot.startedAt > LOGIN_DEADLINE_MS) {
                 bot.requestStop("couldn't log in");
             }
             return;
         }
-        Character self = storage.getCharacterById(bot.charId);
-        if (self == null || !self.isLoggedinWorld() || self.isChangingMaps()) {
-            return;             // still entering the world, or between maps
+        if (!inWorld || self.isChangingMaps()) {
+            return;             // between maps, or its logout is already under way
         }
 
         if (!bot.placed) {
-            if (owner.getEventInstance() == null && warpToOwner(self, owner)) {
-                bot.placed = true;
+            if (owner.getEventInstance() != null) {
+                return;
             }
+            // Warp only if needed. FollowPlanner doesn't use portals right after logging in, so this
+            // warp can't overlap a CHANGE_MAP of the bot's own (see LOGIN_TRAVEL_DELAY_MS there).
+            if (self.getMapId() != owner.getMapId()) {
+                warpToOwner(self, owner);
+            }
+            bot.placed = true;
             return;
         }
 
@@ -351,14 +365,37 @@ public final class BotPartySupervisor {
             return;
         }
 
-        if (self.getMapId() == owner.getMapId()) {
+        catchUp(bot, self, owner, now);
+    }
+
+    /**
+     * Warps a bot that has been left on another map. The hazard is racing the bot's own portal use:
+     * packet handlers take no per-client lock, so a warp from this thread could run concurrently with
+     * {@code ChangeMapHandler} for the same character. So the timer restarts whenever either side's
+     * map changes, and a warp only happens once the bot can no longer be mid-portal:
+     * <ul>
+     *   <li>no portal leads from the bot's map to the owner's, so {@link FollowPlanner} never tried one; or</li>
+     *   <li>one does, but the bot has had {@link #CATCH_UP_GIVE_UP_MS} - several times the planner's
+     *       whole attempt budget - and must have given up on it (a quest-gated portal, say).</li>
+     * </ul>
+     */
+    private static void catchUp(SummonedBot bot, Character self, Character owner, long now) {
+        int selfMap = self.getMapId();
+        int ownerMap = owner.getMapId();
+        if (selfMap == ownerMap || owner.getEventInstance() != null) {
             bot.awayFromOwnerSince = 0;
-        } else if (bot.awayFromOwnerSince == 0) {
+            return;
+        }
+        if (bot.awayFromOwnerSince == 0 || bot.awaySelfMap != selfMap || bot.awayOwnerMap != ownerMap) {
             bot.awayFromOwnerSince = now;
-        } else if (now - bot.awayFromOwnerSince > CATCH_UP_AFTER_MS && owner.getEventInstance() == null) {
-            if (warpToOwner(self, owner)) {
-                log.info("Summoned bot {} fell behind {}, warped to map {}", bot.name, owner.getName(), owner.getMapId());
-            }
+            bot.awaySelfMap = selfMap;
+            bot.awayOwnerMap = ownerMap;
+            return;
+        }
+        long away = now - bot.awayFromOwnerSince;
+        boolean portalExists = MapPortals.leadingTo(selfMap, ownerMap).isPresent();
+        if (away > (portalExists ? CATCH_UP_GIVE_UP_MS : CATCH_UP_AFTER_MS) && warpToOwner(self, owner)) {
+            log.info("Summoned bot {} fell behind {} (map {} -> {}), warped", bot.name, owner.getName(), selfMap, ownerMap);
             bot.awayFromOwnerSince = 0;
         }
     }

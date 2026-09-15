@@ -65,6 +65,8 @@ final class SummonedBot implements Runnable {
     int invitesSent;
     long lastInviteAt;
     long awayFromOwnerSince;
+    int awaySelfMap;
+    int awayOwnerMap;
 
     SummonedBot(BotPartySupervisor supervisor, int ownerId, String ownerName, int worldId, int channel, int slot,
                 String name) {
