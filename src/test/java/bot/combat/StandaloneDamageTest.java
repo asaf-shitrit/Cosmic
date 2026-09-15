@@ -3,7 +3,11 @@ package bot.combat;
 import bot.WorldState;
 import client.inventory.WeaponType;
 import org.junit.jupiter.api.Test;
-import provider.wz.WZFiles;
+import org.w3c.dom.Document;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.xpath.XPath;
+import javax.xml.xpath.XPathFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,12 +33,27 @@ class StandaloneDamageTest {
         assertEquals(WeaponType.NOT_A_WEAPON, CombatMath.weaponType(0));
     }
 
+    /**
+     * The WZ entry holds the fields {@link MobDefense} reads, with the values the other tests use for
+     * the Ligator. Parsed with plain DOM on purpose: the server's WZ parser initialises
+     * {@code GameConstants}, which fixes {@code WZFiles.DIRECTORY} for the whole JVM, and any test that
+     * ran before {@code MobSkillFactoryTest} (which points it at a temp dir) would break it.
+     */
     @Test
-    void readsMonsterDefenceFromWz() {
-        // WZFiles fixes its directory once per JVM, and MobSkillFactoryTest points it at a temp dir, so
-        // only check the real data when this JVM is reading it.
-        assumeTrue(Files.exists(Path.of(WZFiles.DIRECTORY, "Mob.wz", "9300001.img.xml")));
-        assertEquals(new DamageModel.Target(32, 90, 10), MobDefense.of(9300001));   // Ligator (PC)
+    void ligatorWzEntryHasTheDefenceFieldsMobDefenseReads() throws Exception {
+        Path ligator = Path.of("wz", "Mob.wz", "9300001.img.xml");
+        assumeTrue(Files.exists(ligator));
+        Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(ligator.toFile());
+        XPath xpath = XPathFactory.newInstance().newXPath();
+        IntUnaryOperatorByName info = name -> Integer.parseInt(xpath.evaluate(
+                "/imgdir/imgdir[@name='info']/int[@name='" + name + "']/@value", doc));
+        assertEquals(new DamageModel.Target(32, 90, 10),
+                new DamageModel.Target(info.apply("level"), info.apply("PDDamage"), info.apply("eva")));
+    }
+
+    @FunctionalInterface
+    private interface IntUnaryOperatorByName {
+        int apply(String name) throws Exception;
     }
 
     @Test
