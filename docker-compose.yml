@@ -2,6 +2,9 @@ version: '3'
 services:
   maplestory:
     build: .
+    # Come back after a host reboot or a crash, but stay down if stopped deliberately
+    # (docker compose stop/down). Only takes effect if Docker Desktop itself starts on sign-in.
+    restart: unless-stopped
     depends_on:
       - db
     ports:
@@ -22,6 +25,7 @@ services:
     
   db:
     image: mysql:8.4.0
+    restart: unless-stopped
     environment:
       MYSQL_DATABASE: "cosmic"
       MYSQL_ROOT_PASSWORD: ""
