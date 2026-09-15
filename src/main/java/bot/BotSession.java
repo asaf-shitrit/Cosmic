@@ -228,6 +228,15 @@ public class BotSession {
         int lastPlannedVersion = -1;
         long lastPlanAt = 0;
         boolean forceReplan = true;   // always take the first opportunity to plan
+        long planTicks = 0;
+        long lastHeartbeatAt = 0;
+        // Every 5s, not every tick - REPLAN_FLOOR_MS alone would make this ~3/sec and drown the log.
+        // Added after a live run went completely silent for its whole budget with no server-side
+        // evidence either way: the ambiguity this resolves is "is plan() even being called" (a driver
+        // bug - the loop itself isn't ticking) versus "plan() runs and keeps returning Idle" (a planner
+        // bug - see KpqPlanner#plan's mapChanges==0 fix for a real example of the latter). Without this,
+        // telling those two apart meant re-instrumenting and re-running instead of just reading the log.
+        final long HEARTBEAT_MS = 5000;
 
         while (System.currentTimeMillis() < deadline) {
             try {
@@ -273,6 +282,7 @@ public class BotSession {
             boolean floorElapsed = now - lastPlanAt >= REPLAN_FLOOR_MS;
             if (forceReplan || notableChange || floorElapsed) {
                 Action action = planner.plan(world, world.getSelfPosition());
+                planTicks++;
                 lastPlannedVersion = world.getChangeVersion();
                 lastPlanAt = now;
                 forceReplan = false;
@@ -281,6 +291,12 @@ public class BotSession {
                     System.out.println("[plan]  " + action);
                     executor.execute(action);
                     forceReplan = true;   // objective step just completed - replan promptly, not on the floor
+                } else if (now - lastHeartbeatAt >= HEARTBEAT_MS) {
+                    // Idle itself is silent by design (see the branch above), so without this an
+                    // all-Idle run - whether genuinely waiting or a stuck planner - prints nothing at
+                    // all after world entry, which is exactly the ambiguity this exists to remove.
+                    lastHeartbeatAt = now;
+                    System.out.println("[tick]  plan #" + planTicks + ": Idle (loop is ticking; planner has nothing to do)");
                 }
             }
         }
