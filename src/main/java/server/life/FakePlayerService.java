@@ -35,6 +35,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * produces a random walk with no net displacement, which reads as jittering on the spot rather
  * than going somewhere.
  *
+ * <p>Towns and training fields are populated differently, driven by the map's own data: town
+ * crowds are placed by activity mix alone, while a field's mob spawn points decide where its
+ * grinders stand and where its resters sit (see {@link #chooseSpawnPosition}).
+ *
  * @see FakePlayerActivity for how destinations and loitering times are chosen
  */
 public class FakePlayerService {
@@ -51,6 +55,14 @@ public class FakePlayerService {
     private static final int ARRIVAL_PIXELS = 160;
     /** How far an anchored fake player will drift from the spot it was spawned at. */
     private static final int ANCHOR_DRIFT_PIXELS = 220;
+    /**
+     * How many spots a CLEARING fake player samples before setting off. MapleMap hands out mob
+     * spawn points by proximity rather than as a list, so a map's spawn clusters are read back
+     * out by sampling spots and snapping each to its nearest spawn point.
+     */
+    private static final int CLUSTER_SAMPLE_COUNT = 4;
+    /** How many spots a RESTING fake player samples to find one clear of the mobs. */
+    private static final int RESTING_SAMPLE_COUNT = 12;
 
     private static final String[] NAMES = {
             "Sera", "Doyle", "Kappa", "Mirin", "Tobi", "Wisp", "Nico", "Fenn", "Rilla", "Oz",
@@ -120,6 +132,21 @@ public class FakePlayerService {
             FakePlayerActivity.TRAVELLING, FakePlayerActivity.VENDING,
     };
 
+    /**
+     * A training field: mostly people working the mobs, some moving on to the next group, and the
+     * odd one sitting out a respawn. Repeating an entry weights it, so GRINDING dominates.
+     */
+    private static final FakePlayerActivity[] FIELD_MIX = {
+            FakePlayerActivity.GRINDING, FakePlayerActivity.GRINDING, FakePlayerActivity.GRINDING,
+            FakePlayerActivity.CLEARING, FakePlayerActivity.CLEARING, FakePlayerActivity.RESTING,
+    };
+
+    /** A field people also cross on the way somewhere else, so it keeps some through traffic. */
+    private static final FakePlayerActivity[] FIELD_TRAFFIC_MIX = {
+            FakePlayerActivity.GRINDING, FakePlayerActivity.GRINDING, FakePlayerActivity.GRINDING,
+            FakePlayerActivity.CLEARING, FakePlayerActivity.RESTING, FakePlayerActivity.TRAVELLING,
+    };
+
     private static final Crowd[] WORLD_CROWDS = {
             // The Free Market was always the busiest map in the game, and almost entirely parked shops.
             new Crowd(MapId.FM_ENTRANCE, 4.0, new FakePlayerActivity[]{
@@ -139,6 +166,26 @@ public class FakePlayerService {
             new Crowd(MapId.SLEEPYWOOD, 0.5, TOWN_MIX),
             new Crowd(MapId.ORBIS, 1.0, TOWN_MIX),
             new Crowd(MapId.EL_NATH, 0.5, TOWN_MIX),
+
+            // Training fields. Every map id below was checked against this server's own Map.wz
+            // (wz/Map.wz/Map/MapN/<id>.img.xml) and named from String.wz/Map.img.xml; each is an
+            // open-world map whose returnMap is the town it hangs off. They are deliberately
+            // sparse - a v83 field held a handful of people, not a crowd.
+            //
+            // The first field out of each Victoria Island town, which is where most of a v83
+            // session was actually spent: pigs and snails east of Henesys, slimes north of
+            // Ellinia, stumps east of Perion, octopi and slimes by the Kerning construction site.
+            new Crowd(100010000, 0.8, FIELD_TRAFFIC_MIX),   // The Hill East of Henesys
+            new Crowd(100030000, 0.5, FIELD_TRAFFIC_MIX),   // The Forest East of Henesys
+            new Crowd(101020000, 0.5, FIELD_TRAFFIC_MIX),   // The Forest North of Ellinia
+            new Crowd(101030000, 0.5, FIELD_TRAFFIC_MIX),   // East Domain of Perion
+            new Crowd(103010000, 0.5, FIELD_TRAFFIC_MIX),   // Kerning City Construction Site
+            // The Ant Tunnels out of Sleepywood, the other half of the low-level game.
+            new Crowd(105050100, 0.5, FIELD_MIX),           // Ant Tunnel II
+            // One mid-level grinding spot per town that had one.
+            new Crowd(220040200, 0.5, FIELD_MIX),           // Ludibrium: Crossroad of Time
+            new Crowd(211000200, 0.3, FIELD_MIX),           // El Nath: Snowy Hill
+            new Crowd(230010000, 0.3, FIELD_MIX),           // Aqua Road: Ocean I.C
     };
 
     /**
@@ -227,7 +274,7 @@ public class FakePlayerService {
 
     /**
      * Scatters {@code count} fake players across the walkable width of the map, each assigned an
-     * activity sampled from {@code activities}.
+     * activity sampled from {@code activities} and placed according to what that activity does.
      *
      * @return how many actually found ground to stand on.
      */
@@ -238,12 +285,70 @@ public class FakePlayerService {
         int spawned = 0;
 
         for (int i = 0; i < count; i++) {
-            int x = minX + Randomizer.nextInt(Math.max(1, maxX - minX));
-            if (spawn(map, new Point(x, footholds.getY1()), pick(activities)) != null) {
+            FakePlayerActivity activity = pick(activities);
+            if (spawn(map, chooseSpawnPosition(map, activity, minX, maxX), activity) != null) {
                 spawned++;
             }
         }
         return spawned;
+    }
+
+    /**
+     * The spot a fake player doing {@code activity} appears at, before being snapped to the
+     * ground. A field puts people on the mobs they farm and clear of them when they're resting,
+     * so the activity picks the spot; everything else just lands wherever the scatter puts it.
+     *
+     * <p>Positions are read from the map's own data - its mob spawn points and footholds - never
+     * from coordinates written down here.
+     *
+     * <p>Package-private so {@code FakePlayerServiceTest} can exercise it against a stubbed map:
+     * spawning an actual fake player needs Item.wz and the database, neither of which a unit test
+     * should be reaching for.
+     */
+    Point chooseSpawnPosition(MapleMap map, FakePlayerActivity activity, int minX, int maxX) {
+        FootholdTree footholds = map.getFootholds();
+        int x = minX + Randomizer.nextInt(Math.max(1, maxX - minX));
+
+        if (activity == FakePlayerActivity.GRINDING) {
+            SpawnPoint spawn = nearestSpawnPoint(map, new Point(x, footholds.getY1()));
+            if (spawn != null) {
+                // Start from the spawn point's own coordinates rather than the top of the map:
+                // on a map with stacked floors, snapping from the top drops the fake player onto
+                // whatever platform is highest there, which is usually not the one with the mobs.
+                return spawn.getPosition();
+            }
+        } else if (activity == FakePlayerActivity.RESTING) {
+            return chooseRestingSpot(map, minX, maxX);
+        }
+
+        return new Point(x, footholds.getY1());
+    }
+
+    /**
+     * A spot for a resting fake player. Of a handful of sampled spots the one whose nearest mob
+     * spawn point is furthest away wins, so it reads as sitting out of the mobs' way, e.g. at the
+     * edge of a platform. On a map with no spawn points any spot will do.
+     */
+    private Point chooseRestingSpot(MapleMap map, int minX, int maxX) {
+        FootholdTree footholds = map.getFootholds();
+        int width = Math.max(1, maxX - minX);
+        Point best = new Point(minX + Randomizer.nextInt(width), footholds.getY1());
+        double bestDistance = -1;
+
+        for (int i = 0; i < RESTING_SAMPLE_COUNT; i++) {
+            Point candidate = groundBelow(map, new Point(minX + Randomizer.nextInt(width), footholds.getY1()));
+            if (candidate == null) {
+                continue;
+            }
+
+            SpawnPoint spawn = map.findClosestSpawnpoint(candidate);
+            double distance = spawn == null ? Double.MAX_VALUE : spawn.getPosition().distanceSq(candidate);
+            if (distance > bestDistance) {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+        return best;
     }
 
     /**
@@ -252,14 +357,9 @@ public class FakePlayerService {
      * @return the spawned fake player, or null if the position has no foothold under it.
      */
     public FakePlayer spawn(MapleMap map, Point position, FakePlayerActivity activity) {
-        Point ground;
-        try {
-            ground = map.getGroundBelow(position);
-        } catch (Exception e) {
-            return null;    // no foothold below the requested point
-        }
+        Point ground = groundBelow(map, position);
         if (ground == null) {
-            return null;
+            return null;    // no foothold below the requested point
         }
 
         FakePlayer fakePlayer = createRandom();
@@ -344,14 +444,9 @@ public class FakePlayerService {
         int step = Math.min(STEP_PIXELS, Math.abs(remaining));
         int targetX = clampToMap(map, current.x + (left ? -step : step));
 
-        Point destination;
-        try {
-            destination = map.getGroundBelow(new Point(targetX, current.y));
-        } catch (Exception e) {
-            destination = null;     // walked off the end of a foothold
-        }
+        Point destination = groundBelow(map, new Point(targetX, current.y));
 
-        if (destination == null) {
+        if (destination == null) {  // walked off the end of a foothold
             // Can't get there from here; give up on this destination and pick another.
             wanderer.destinationX = chooseDestination(wanderer);
             wanderer.dwellTicks = 1;
@@ -387,6 +482,10 @@ public class FakePlayerService {
             }
         }
 
+        if (wanderer.activity == FakePlayerActivity.CLEARING) {
+            return chooseClusterDestination(wanderer);
+        }
+
         // Travelling: head for somewhere genuinely far away, so it reads as crossing the map.
         int width = Math.max(1, maxX - minX);
         int currentX = wanderer.fakePlayer.getPosition().x;
@@ -397,6 +496,55 @@ public class FakePlayerService {
                     : maxX - Randomizer.nextInt(width / 3);
         }
         return clampToMap(map, target);
+    }
+
+    /**
+     * Picks a group of mobs for a CLEARING fake player to walk to. Spots are sampled and the one
+     * furthest from where the fake player currently stands wins, so it reads as moving on to
+     * fresh mobs rather than circling the ones it just left. On a map with no spawn points the
+     * samples stay where they were drawn, which just crosses the map.
+     */
+    private int chooseClusterDestination(Wanderer wanderer) {
+        MapleMap map = wanderer.map;
+        FootholdTree footholds = map.getFootholds();
+        int minX = footholds.getMinDropX();
+        int maxX = footholds.getMaxDropX();
+        int width = Math.max(1, maxX - minX);
+        int currentX = wanderer.fakePlayer.getPosition().x;
+
+        int best = snapToSpawnPoint(map, minX + Randomizer.nextInt(width));
+        for (int i = 1; i < CLUSTER_SAMPLE_COUNT; i++) {
+            int candidate = snapToSpawnPoint(map, minX + Randomizer.nextInt(width));
+            if (Math.abs(candidate - currentX) > Math.abs(best - currentX)) {
+                best = candidate;
+            }
+        }
+        return clampToMap(map, best);
+    }
+
+    /** The x of the mob spawn point nearest {@code x}, or {@code x} itself if there is no spawn point. */
+    private static int snapToSpawnPoint(MapleMap map, int x) {
+        SpawnPoint spawn = nearestSpawnPoint(map, new Point(x, map.getFootholds().getY1()));
+        return spawn == null ? x : spawn.getPosition().x;
+    }
+
+    /**
+     * The mob spawn point nearest to {@code from}, or null if the map has none. MapleMap exposes
+     * spawn points only by proximity, so callers that want a map's spawn clusters sample spots and
+     * ask for the nearest spawn point to each.
+     */
+    private static SpawnPoint nearestSpawnPoint(MapleMap map, Point from) {
+        Point ground = groundBelow(map, from);
+        return ground == null ? null : map.findClosestSpawnpoint(ground);
+    }
+
+    /** The walkable ground under {@code from}, or null if there is no foothold below it. */
+    private static Point groundBelow(MapleMap map, Point from) {
+        try {
+            return map.getGroundBelow(from);
+        } catch (Exception e) {
+            return null;    // no foothold below the requested point
+        }
     }
 
     /**
