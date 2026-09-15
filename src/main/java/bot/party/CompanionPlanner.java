@@ -73,7 +73,8 @@ final class CompanionPlanner implements Planner {
             }
             EventInstanceManager instance = self.getEventInstance();
             if (kpq == null || lastInstance != instance) {
-                kpq = KpqPlanner.summonedMember(bot.slot, bot.ownerId, bot.ownerName, combat::attackTarget);
+                kpq = KpqPlanner.summonedMember(bot.slot, bot.ownerId, bot.ownerName, combat::attackTarget,
+                        combat::attackReach);
                 lastInstance = instance;
             }
             bot.activity = "helping with Kerning Party Quest";

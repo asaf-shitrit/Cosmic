@@ -9,7 +9,10 @@ import client.SkillFactory;
 import client.inventory.InventoryType;
 import client.inventory.Item;
 import constants.id.ItemId;
+import constants.inventory.ItemConstants;
+import constants.skills.Archer;
 import constants.skills.Cleric;
+import constants.skills.Magician;
 import constants.skills.Spearman;
 import constants.skills.Warrior;
 import server.StatEffect;
@@ -29,7 +32,7 @@ import java.util.random.RandomGenerator;
  */
 public final class CombatController {
     public static final int OWNER_LEASH = 700;
-    public static final int MELEE_RANGE = 110;
+    public static final int MELEE_RANGE = AttackReach.MELEE;
     /**
      * Heal, Bless and Hyper Body all reach {@code lt=(-250,-150) rb=(250,150)} around the caster at the
      * levels a companion has (Skill.wz 230.img / 130.img); {@code StatEffect#applyBuff} tests the
@@ -70,7 +73,7 @@ public final class CombatController {
     public Optional<Action> assist(WorldState world, Point position) {
         Character owner = ownerSupplier.get();
         Character self = selfSupplier.get();
-        if (!canAct(self, owner, position) || self.getJob().isA(Job.MAGICIAN)) {
+        if (!canAct(self, owner, position) || !fights(self)) {
             return Optional.empty();
         }
         boolean kpqCombat = kpqCombatMap(owner.getMapId());
@@ -87,14 +90,14 @@ public final class CombatController {
     }
 
     /**
-     * Attack a specific observed monster if it remains inside the owner leash. A Cleric companion
-     * doesn't: with a wand and a Cleric's STR its swing does 1 damage (seen live), and its magic
-     * attacks aren't implemented, so it heals and buffs instead.
+     * Attack a specific observed monster if it remains inside the owner leash, from this companion's
+     * reach: a warrior steps onto it, a magician or bowman stands off level with it (see
+     * {@link AttackReach}). A Cleric doesn't attack: it heals and buffs instead.
      */
     public Action attackTarget(WorldState world, Point position, int monsterObjectId) {
         Character self = selfSupplier.get();
         Character owner = ownerSupplier.get();
-        if (!canAct(self, owner, position) || self.getJob().isA(Job.MAGICIAN)) {
+        if (!canAct(self, owner, position) || !fights(self)) {
             return new Action.Idle();
         }
         boolean kpqCombat = kpqCombatMap(owner.getMapId());
@@ -104,20 +107,77 @@ public final class CombatController {
         if (mob == null || !withinLeash(mob, owner, kpqCombat)) {
             return new Action.Idle();
         }
-        if (position.distanceSq(mob.position()) > (long) MELEE_RANGE * MELEE_RANGE) {
-            return new Action.MoveTo(mob.position());
+        int reach = reachFor(self);
+        if (!AttackReach.inReach(position, mob.position(), reach)) {
+            return new Action.MoveTo(AttackReach.approach(position, mob.position(), reach));
         }
         long now = clock.getAsLong();
         if (now - lastAttack < ATTACK_COOLDOWN_MS) {
             return new Action.Idle();
         }
         lastAttack = now;
+        if (self.getJob().isA(Job.BOWMAN)) {
+            return shoot(self, mob);
+        }
+        if (self.getJob().isA(Job.MAGICIAN)) {
+            return cast(self, mob);
+        }
         SkillChoice choice = meleeSkill(self);
         if (choice == null) {
             return new Action.AttackMonster(monsterObjectId, CombatMath.lineDamage(self, 100, mob.monsterId(), rng));
         }
         return new Action.SkillAttackMonster(monsterObjectId, choice.skillId(),
                 CombatMath.lineDamage(self, choice.effect().getDamage(), mob.monsterId(), rng));
+    }
+
+    /** How close the live character's job attacks from; {@code KpqPlanner} steps to the same reach. */
+    public int attackReach() {
+        Character self = selfSupplier.get();
+        return self == null ? AttackReach.MELEE : reachFor(self);
+    }
+
+    private static int reachFor(Character self) {
+        if (self.getJob().isA(Job.BOWMAN)) {
+            return AttackReach.BOW;
+        }
+        return self.getJob().isA(Job.MAGICIAN) ? AttackReach.MAGIC : AttackReach.MELEE;
+    }
+
+    /**
+     * Double Shot when it can pay for it, else Arrow Blow, else a plain shot. With no arrow stack large
+     * enough {@code RangedAttackHandler} would drop the attack without a word, so this doesn't send one.
+     */
+    private Action shoot(Character self, WorldState.MonsterSighting mob) {
+        SkillChoice choice = firstCastable(self, Archer.DOUBLE_SHOT, Archer.ARROW_BLOW);
+        StatEffect effect = choice == null ? null : choice.effect();
+        if (!holdsArrows(self, effect == null ? 1 : effect.getBulletCount())) {
+            return new Action.Idle();
+        }
+        return new Action.RangedAttackMonster(mob.objectId(), choice == null ? 0 : choice.skillId(),
+                CombatMath.rangedLines(self, effect, mob.monsterId(), rng));
+    }
+
+    /**
+     * Magic Claw when learned and affordable, else Energy Bolt. Out of MP a magician waits for
+     * {@link #recover} rather than swinging its wand: a spell can't be sent as skill 0.
+     */
+    private Action cast(Character self, WorldState.MonsterSighting mob) {
+        SkillChoice choice = firstCastable(self, Magician.MAGIC_CLAW, Magician.ENERGY_BOLT);
+        if (choice == null) {
+            return new Action.Idle();
+        }
+        return new Action.MagicAttackMonster(mob.objectId(), choice.skillId(),
+                CombatMath.magicLines(self, choice.effect(), choice.level(), mob.monsterId(), rng));
+    }
+
+    /** The stack test {@code RangedAttackHandler} applies: one bow-arrow stack holding at least {@code needed}. */
+    private static boolean holdsArrows(Character self, int needed) {
+        for (Item item : self.getInventory(InventoryType.USE).list()) {
+            if (ItemConstants.isArrowForBow(item.getItemId()) && item.getQuantity() >= needed) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -223,12 +283,23 @@ public final class CombatController {
     }
 
     private static SkillChoice meleeSkill(Character self) {
-        int id = Warrior.POWER_STRIKE;
-        if (!self.getJob().isA(Job.WARRIOR) || !canCast(self, id)) {
-            return null;
+        return self.getJob().isA(Job.WARRIOR) ? firstCastable(self, Warrior.POWER_STRIKE) : null;
+    }
+
+    /** The first of {@code ids} this character has learned and has the MP for, or null. */
+    private static SkillChoice firstCastable(Character self, int... ids) {
+        for (int id : ids) {
+            if (canCast(self, id)) {
+                int level = self.getSkillLevel(id);
+                return new SkillChoice(id, level, SkillFactory.getSkill(id).getEffect(level));
+            }
         }
-        int level = self.getSkillLevel(id);
-        return new SkillChoice(id, level, SkillFactory.getSkill(id).getEffect(level));
+        return null;
+    }
+
+    /** Everyone but a Cleric attacks; the Cleric's job in the party is Heal and Bless. */
+    private static boolean fights(Character self) {
+        return !self.getJob().isA(Job.CLERIC);
     }
 
     record SkillChoice(int skillId, int level, StatEffect effect) {}
