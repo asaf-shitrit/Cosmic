@@ -43,9 +43,12 @@ public final class CompanionLoadout {
     private static final int MAX_LEVEL = 70;
     private static final int BASE_STAT = 4;
 
-    /** Magicians take their first job at 8 ({@code scripts/npc/1032001.js}), everyone else at 10. */
-    static final int MAGICIAN_LEVEL = 8;
-    static final int BOWMAN_LEVEL = 10;
+    /**
+     * Companions are beginners until 10 and take their first job there, magicians included. The game
+     * lets a magician advance at 8 ({@code scripts/npc/1032001.js}), but a party of beginners below 10
+     * is what a low-level party looks like, so every job starts at the same level.
+     */
+    static final int FIRST_JOB_LEVEL = 10;
     static final int SECOND_JOB_LEVEL = 30;
 
     private static final int SWORD = 1302000;       // Sword: no requirements
@@ -90,6 +93,7 @@ public final class CompanionLoadout {
             new Weapon(1452000, 25, 30, 80, 0, 0));     // Battle Bow, WATK 40
 
     enum Role {
+        BEGINNER(Job.BEGINNER, 50),
         WARRIOR(Job.WARRIOR, 50),
         MAGICIAN(Job.MAGICIAN, 200),
         BOWMAN(Job.BOWMAN, 100),
@@ -116,26 +120,24 @@ public final class CompanionLoadout {
     private CompanionLoadout() {}
 
     /**
-     * Slot 0 is a warrior below 30. Slot 1 is a magician from level 8 and slot 2 a bowman from 10, when
-     * each job becomes available; below that they are warriors like slot 0 (a character that young
-     * would really still be a beginner - companions have been first-job warriors at every level below
-     * 30 from the start, and a beginner's single-digit swing would add nothing). From 30 two slots are
-     * spearmen and the third a cleric.
+     * Below 10 all three are beginners with a plain attack. From 10 to 29 slot 0 is a warrior, slot 1 a
+     * magician and slot 2 a bowman. From 30 two slots are spearmen and the third a cleric.
      */
     static Role roleFor(int slot, int level) {
         if (slot < 0 || slot > 2) {
             throw new IllegalArgumentException("companion slot must be 0..2");
         }
+        if (level < FIRST_JOB_LEVEL) {
+            return Role.BEGINNER;
+        }
         if (level >= SECOND_JOB_LEVEL) {
             return slot == 2 ? Role.CLERIC : Role.SPEARMAN;
         }
-        if (slot == 1 && level >= MAGICIAN_LEVEL) {
-            return Role.MAGICIAN;
-        }
-        if (slot == 2 && level >= BOWMAN_LEVEL) {
-            return Role.BOWMAN;
-        }
-        return Role.WARRIOR;
+        return switch (slot) {
+            case 1 -> Role.MAGICIAN;
+            case 2 -> Role.BOWMAN;
+            default -> Role.WARRIOR;
+        };
     }
 
     static int levelFor(int ownerLevel) {
@@ -149,7 +151,8 @@ public final class CompanionLoadout {
         return switch (role) {
             case CLERIC, MAGICIAN -> new Stats(BASE_STAT, BASE_STAT, main, secondary);
             case BOWMAN -> new Stats(secondary, main, BASE_STAT, BASE_STAT);
-            case WARRIOR, SPEARMAN -> new Stats(main, secondary, BASE_STAT, BASE_STAT);
+            // A beginner swings a sword with a plain attack, so its AP go where a warrior's would.
+            case BEGINNER, WARRIOR, SPEARMAN -> new Stats(main, secondary, BASE_STAT, BASE_STAT);
         };
     }
 
@@ -185,6 +188,7 @@ public final class CompanionLoadout {
     static Map<Integer, Integer> skillsFor(Role role, int level) {
         Map<Integer, Integer> skills = new LinkedHashMap<>();
         switch (role) {
+            case BEGINNER -> { }    // no job skills: CombatController falls back to a plain attack
             case WARRIOR -> skills.put(Warrior.POWER_STRIKE, powerStrikeLevel(level));
             case SPEARMAN -> {
                 skills.put(Warrior.POWER_STRIKE, powerStrikeLevel(level));
@@ -196,12 +200,12 @@ public final class CompanionLoadout {
                 skills.put(Cleric.BLESS, secondJobSkillLevel(level));
             }
             case MAGICIAN -> {
-                int sp = firstJobSp(level, MAGICIAN_LEVEL);
+                int sp = firstJobSp(level, FIRST_JOB_LEVEL);
                 skills.put(Magician.ENERGY_BOLT, 1);
                 put(skills, Magician.MAGIC_CLAW, Math.min(20, sp - 1));
             }
             case BOWMAN -> {
-                int sp = firstJobSp(level, BOWMAN_LEVEL) - 1;
+                int sp = firstJobSp(level, FIRST_JOB_LEVEL) - 1;
                 skills.put(Archer.ARROW_BLOW, 1);
                 int doubleShot = Math.min(20, sp);
                 int critical = Math.min(20, sp - doubleShot);
@@ -225,7 +229,7 @@ public final class CompanionLoadout {
         List<Weapon> path = switch (role) {
             case MAGICIAN -> WANDS;
             case BOWMAN -> BOWS;
-            case WARRIOR -> List.of(new Weapon(SWORD, 0, 0, 0, 0, 0));
+            case BEGINNER, WARRIOR -> List.of(new Weapon(SWORD, 0, 0, 0, 0, 0));   // reqJob 0: any job
             case SPEARMAN -> List.of(new Weapon(POLE_ARM, 10, 0, 0, 0, 0));
             case CLERIC -> List.of(new Weapon(WAND, 8, 0, 0, 0, 0));
         };
@@ -253,6 +257,7 @@ public final class CompanionLoadout {
             case CLERIC, MAGICIAN -> new int[]{50 + level * 12, 5 + level * 28};
             case BOWMAN -> new int[]{50 + level * 20, 5 + level * 14};
             case WARRIOR, SPEARMAN -> new int[]{50 + level * 32, 5 + level * 10};
+            case BEGINNER -> new int[]{50 + level * 12, 5 + level * 10};
         };
     }
 

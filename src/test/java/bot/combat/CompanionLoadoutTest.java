@@ -16,24 +16,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CompanionLoadoutTest {
     @Test
-    void mixedFirstJobPartyBelowThirtyThenTwoSpearmenAndACleric() {
+    void beginnersBelowTenThenAMixedFirstJobPartyThenTwoSpearmenAndACleric() {
+        for (int slot = 0; slot < 3; slot++) {
+            assertEquals(CompanionLoadout.Role.BEGINNER, CompanionLoadout.roleFor(slot, 1));
+            assertEquals(CompanionLoadout.Role.BEGINNER, CompanionLoadout.roleFor(slot, 9));
+        }
+        // Magicians too: companions take every first job at 10, not a magician's 8.
+        assertEquals(CompanionLoadout.Role.BEGINNER, CompanionLoadout.roleFor(1, 8));
+
+        assertEquals(CompanionLoadout.Role.WARRIOR, CompanionLoadout.roleFor(0, 10));
+        assertEquals(CompanionLoadout.Role.MAGICIAN, CompanionLoadout.roleFor(1, 10));
+        assertEquals(CompanionLoadout.Role.BOWMAN, CompanionLoadout.roleFor(2, 10));
         assertEquals(CompanionLoadout.Role.WARRIOR, CompanionLoadout.roleFor(0, 29));
         assertEquals(CompanionLoadout.Role.MAGICIAN, CompanionLoadout.roleFor(1, 29));
         assertEquals(CompanionLoadout.Role.BOWMAN, CompanionLoadout.roleFor(2, 29));
-
-        // Each job from the level it becomes available; a warrior until then.
-        assertEquals(CompanionLoadout.Role.WARRIOR, CompanionLoadout.roleFor(1, 7));
-        assertEquals(CompanionLoadout.Role.MAGICIAN, CompanionLoadout.roleFor(1, 8));
-        assertEquals(CompanionLoadout.Role.WARRIOR, CompanionLoadout.roleFor(2, 9));
-        assertEquals(CompanionLoadout.Role.BOWMAN, CompanionLoadout.roleFor(2, 10));
-        for (int slot = 0; slot < 3; slot++) {
-            assertEquals(CompanionLoadout.Role.WARRIOR, CompanionLoadout.roleFor(slot, 1));
-        }
 
         assertEquals(CompanionLoadout.Role.SPEARMAN, CompanionLoadout.roleFor(0, 30));
         assertEquals(CompanionLoadout.Role.SPEARMAN, CompanionLoadout.roleFor(1, 30));
         assertEquals(CompanionLoadout.Role.CLERIC, CompanionLoadout.roleFor(2, 30));
         assertThrows(IllegalArgumentException.class, () -> CompanionLoadout.roleFor(3, 30));
+    }
+
+    @Test
+    void beginnerHasNoJobSkillsAndASwordAnyJobCanWear() {
+        assertEquals(Map.of(), CompanionLoadout.skillsFor(CompanionLoadout.Role.BEGINNER, 9));
+        assertEquals(1302000, CompanionLoadout.weaponFor(CompanionLoadout.Role.BEGINNER, 5));
+        assertFalse(CompanionLoadout.wearsAccuracyCap(CompanionLoadout.Role.BEGINNER, 9));
+        assertEquals(0, CompanionLoadout.arrowsFor(CompanionLoadout.Role.BEGINNER));
     }
 
     @Test
@@ -47,7 +56,7 @@ class CompanionLoadoutTest {
         assertEquals(new CompanionLoadout.Stats(4, 4, 100, 28), CompanionLoadout.statsFor(CompanionLoadout.Role.MAGICIAN, 25));
         assertEquals(new CompanionLoadout.Stats(28, 100, 4, 4), CompanionLoadout.statsFor(CompanionLoadout.Role.BOWMAN, 25));
         // Every role meets its first-job gate the level it gets the job: Magician INT 20, Bowman DEX 25.
-        assertTrue(CompanionLoadout.statsFor(CompanionLoadout.Role.MAGICIAN, 8).int_() >= 20);
+        assertTrue(CompanionLoadout.statsFor(CompanionLoadout.Role.MAGICIAN, 10).int_() >= 20);
         assertTrue(CompanionLoadout.statsFor(CompanionLoadout.Role.BOWMAN, 10).dex() >= 25);
     }
 
@@ -60,9 +69,10 @@ class CompanionLoadoutTest {
 
     @Test
     void magicianSpendsItsSpOnEnergyBoltThenMagicClaw() {
-        assertEquals(Map.of(Magician.ENERGY_BOLT, 1), CompanionLoadout.skillsFor(CompanionLoadout.Role.MAGICIAN, 8));
+        // First job at 10: 1 SP there, 3 more per level.
+        assertEquals(Map.of(Magician.ENERGY_BOLT, 1), CompanionLoadout.skillsFor(CompanionLoadout.Role.MAGICIAN, 10));
         assertEquals(Map.of(Magician.ENERGY_BOLT, 1, Magician.MAGIC_CLAW, 3),
-                CompanionLoadout.skillsFor(CompanionLoadout.Role.MAGICIAN, 9));
+                CompanionLoadout.skillsFor(CompanionLoadout.Role.MAGICIAN, 11));
         assertEquals(Map.of(Magician.ENERGY_BOLT, 1, Magician.MAGIC_CLAW, 20),
                 CompanionLoadout.skillsFor(CompanionLoadout.Role.MAGICIAN, 25));
     }
@@ -90,7 +100,7 @@ class CompanionLoadoutTest {
 
     @Test
     void weaponsFollowTheUpgradePathOnlyWhenLevelAndStatsAllow() {
-        assertEquals(1372005, CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, 8));      // Wooden Wand
+        assertEquals(1372005, CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, 10));     // Wooden Wand
         assertEquals(1372006, CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, 13));     // Hardwood Wand
         assertEquals(1372002, CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, 21));     // Metal Wand
         assertEquals(1372004, CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, 25));     // Ice Wand
@@ -108,13 +118,13 @@ class CompanionLoadoutTest {
         assertEquals(1442000, CompanionLoadout.weaponFor(CompanionLoadout.Role.SPEARMAN, 30));
         assertEquals(1372005, CompanionLoadout.weaponFor(CompanionLoadout.Role.CLERIC, 30));
 
-        for (int level = CompanionLoadout.MAGICIAN_LEVEL; level < 30; level++) {
+        for (int level = CompanionLoadout.FIRST_JOB_LEVEL; level < 30; level++) {
             int id = CompanionLoadout.weaponFor(CompanionLoadout.Role.MAGICIAN, level);
             int lvl = level;
             assertTrue(CompanionLoadout.WANDS.stream().anyMatch(w -> w.id() == id
                     && w.wearableBy(lvl, CompanionLoadout.statsFor(CompanionLoadout.Role.MAGICIAN, lvl))));
         }
-        for (int level = CompanionLoadout.BOWMAN_LEVEL; level < 30; level++) {
+        for (int level = CompanionLoadout.FIRST_JOB_LEVEL; level < 30; level++) {
             int id = CompanionLoadout.weaponFor(CompanionLoadout.Role.BOWMAN, level);
             int lvl = level;
             assertTrue(CompanionLoadout.BOWS.stream().anyMatch(w -> w.id() == id
