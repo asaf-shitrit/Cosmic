@@ -37,9 +37,33 @@ final class BotAccounts {
      *
      * @return the name, or {@code null} if this owner's id is too long to fit
      */
-    static String botName(int ownerCharId, int slot) {
+    /**
+     * The <em>account</em> name for one of an owner's companion slots: {@code Shu<ownerId>b<slot+1>}.
+     *
+     * <p>Machine-readable on purpose, and invisible to players - it is what the server-side bookkeeping
+     * looks a companion up by, while the character standing in the world gets a human name from
+     * {@link CompanionNames}. Encoding the slot here is what makes a companion the same character (and
+     * the same person) every time it is summoned.
+     */
+    static String botAccountName(int ownerCharId, int slot) {
         String name = "Shu" + ownerCharId + "b" + (slot + 1);
         return name.length() <= MAX_NAME_LENGTH ? name : null;
+    }
+
+    /** The slot a bot account name encodes, or -1 if this is not one. */
+    static int slotOfBotAccount(String accountName) {
+        if (accountName == null || !accountName.startsWith("Shu")) {
+            return -1;
+        }
+        int b = accountName.lastIndexOf('b');
+        if (b < 0 || b + 1 >= accountName.length()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(accountName.substring(b + 1)) - 1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     /**
@@ -72,12 +96,14 @@ final class BotAccounts {
                 ps.setInt(1, accountId);
                 try (ResultSet rs = ps.executeQuery()) {
                     int count = 0;
-                    boolean foreign = false;
                     while (rs.next()) {
                         count++;
-                        foreign |= !rs.getString(1).equalsIgnoreCase(accountName);
                     }
-                    if (count > 1 || foreign) {
+                    // A bot account holds at most one character. It used to have to hold one whose name
+                    // matched the account's, which stopped being true when companions started getting
+                    // human names - a character name is for players to read, the account name is for
+                    // lookups. Two characters on the account would still mean it is not ours to reuse.
+                    if (count > 1) {
                         throw new IllegalStateException("account " + accountName + " is not a bot account");
                     }
                 }

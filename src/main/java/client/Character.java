@@ -983,13 +983,27 @@ public class Character extends AbstractCharacterObject {
     }
 
     public static boolean canCreateChar(String name) {
+        return !isBlockedName(name) && getIdByName(name) < 0
+                && Pattern.compile("[a-zA-Z0-9]{3,12}").matcher(name).matches();
+    }
+
+    /**
+     * Whether a name contains a blocked substring. Split out of {@link #canCreateChar} so it can be
+     * checked without a database: a refused name fails <em>silently</em> - no error packet, no
+     * disconnect, the client just waits forever - which makes it worth guarding wherever names are
+     * generated.
+     */
+    public static boolean isBlockedName(String name) {
+        if (name == null) {
+            return true;
+        }
         String lname = name.toLowerCase();
         for (String nameTest : BLOCKED_NAMES) {
             if (lname.contains(nameTest)) {
-                return false;
+                return true;
             }
         }
-        return getIdByName(name) < 0 && Pattern.compile("[a-zA-Z0-9]{3,12}").matcher(name).matches();
+        return false;
     }
 
     public boolean canDoor() {

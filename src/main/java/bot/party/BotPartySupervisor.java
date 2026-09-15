@@ -172,7 +172,7 @@ public final class BotPartySupervisor {
                 if (mine.size() >= MAX_BOTS_PER_OWNER || totalBotsLocked() >= MAX_BOTS_TOTAL) {
                     break;
                 }
-                String name = BotAccounts.botName(owner.getId(), slot);
+                String name = BotAccounts.botAccountName(owner.getId(), slot);
                 SummonedBot bot = new SummonedBot(this, owner.getId(), owner.getName(), owner.getWorld(),
                         owner.getClient().getChannel(), slot, name);
                 mine.add(bot);
@@ -198,8 +198,9 @@ public final class BotPartySupervisor {
         }
         log.info("Summoning {} bot(s) for {} on channel {}: {}", started.size(), owner.getName(),
                 owner.getClient().getChannel(), started);
-        return "Alright, I've sent word to #b" + String.join(", ", started) + "#k. They'll arrive and join your"
-                + " party in a few seconds, and they'll follow you wherever you go on this channel.";
+        return "Alright, I've sent word. " + (started.size() == 1 ? "Someone" : "A few of them")
+                + " will arrive and join your party in a few seconds, and they'll follow you wherever you go on"
+                + " this channel.";
     }
 
     public String dismiss(Character owner) {
@@ -216,18 +217,26 @@ public final class BotPartySupervisor {
 
     /** "My bots": every bot slot this player has a character for, with where it is according to the server. */
     public String describe(Character owner) {
-        Map<String, Integer> offlineMaps = loadBotCharacters(owner.getId());
+        Map<Integer, BotCharacter> known = loadBotCharacters(owner.getId());
         List<SummonedBot> mine = snapshotOf(owner.getId());
         PlayerStorage storage = owner.getWorldServer().getPlayerStorage();
 
         StringBuilder sb = new StringBuilder();
         for (int slot = 0; slot < MAX_BOTS_PER_OWNER; slot++) {
-            String name = BotAccounts.botName(owner.getId(), slot);
-            if (name == null) {
+            String account = BotAccounts.botAccountName(owner.getId(), slot);
+            if (account == null) {
                 continue;
             }
             final int s = slot;
             SummonedBot active = mine.stream().filter(b -> b.slot == s).findFirst().orElse(null);
+            BotCharacter character = known.get(slot);
+            // The character's name, not the account's: it is what the player sees, and what the server
+            // stores the bot under. The account is only how this class finds its own bots.
+            String name = active != null && active.characterName != null ? active.characterName
+                    : character == null ? null : character.name();
+            if (name == null) {
+                continue;
+            }
             Character online = storage.getCharacterByName(name);
             String line;
             if (online != null && online.isLoggedinWorld()) {
@@ -241,12 +250,12 @@ public final class BotPartySupervisor {
                 }
             } else if (active != null) {
                 line = active.state() == SummonedBot.State.STOPPING ? "leaving" : "on the way";
-            } else if (offlineMaps.containsKey(name)) {
+            } else if (character != null) {
                 String reason;
                 synchronized (this) {
-                    reason = lastStopReason.get(name);
+                    reason = lastStopReason.get(account);    // keyed by the account this slot belongs to
                 }
-                line = "offline, last in #m" + offlineMaps.get(name) + "#" + (reason == null ? "" : " (" + reason + ")");
+                line = "offline, last in #m" + character.map() + "#" + (reason == null ? "" : " (" + reason + ")");
             } else {
                 continue;
             }
@@ -270,7 +279,7 @@ public final class BotPartySupervisor {
             }
             lastStopReason.put(bot.name, bot.stopReason != null ? bot.stopReason : "disconnected");
         }
-        log.info("Summoned bot {} (owner {}) logged out: {}", bot.name, bot.ownerName,
+        log.info("Summoned bot {} (owner {}) logged out: {}", bot.displayName(), bot.ownerName,
                 bot.stopReason != null ? bot.stopReason : "connection ended");
     }
 
@@ -362,7 +371,10 @@ public final class BotPartySupervisor {
             // bot's character, never the owner or a bystander; prepare() checks the name again.
             // Done once per summon, before CompanionPlanner is allowed to act.
             try {
-                bot.prepared = CompanionLoadout.prepare(self, owner, bot.slot, bot.name);
+                // The character's name, not the account's: prepare() refuses to touch a character that is
+                // not this summon's own, and the name it is told is the one the login read back.
+                bot.prepared = CompanionLoadout.prepare(self, owner, bot.slot,
+                        bot.characterName != null ? bot.characterName : bot.name);
             } catch (RuntimeException e) {
                 // Not retried: a failure here would otherwise log once a second for the whole session.
                 log.warn("Couldn't prepare summoned bot {} for {}", bot.name, owner.getName(), e);
@@ -393,7 +405,7 @@ public final class BotPartySupervisor {
             }
             if (!bot.joinedParty) {
                 bot.joinedParty = true;
-                log.info("Summoned bot {} joined {}'s party {}", bot.name, owner.getName(), selfParty.getId());
+                log.info("Summoned bot {} joined {}'s party {}", bot.displayName(), owner.getName(), selfParty.getId());
             }
         } else if (bot.joinedParty) {
             bot.requestStop("left your party");
@@ -477,7 +489,7 @@ public final class BotPartySupervisor {
         long away = now - bot.awayFromOwnerSince;
         boolean portalExists = MapPortals.leadingTo(selfMap, ownerMap).isPresent();
         if (away > (portalExists ? CATCH_UP_GIVE_UP_MS : CATCH_UP_AFTER_MS) && warpToOwner(self, owner)) {
-            log.info("Summoned bot {} fell behind {} (map {} -> {}), warped", bot.name, owner.getName(), selfMap, ownerMap);
+            log.info("Summoned bot {} fell behind {} (map {} -> {}), warped", bot.displayName(), owner.getName(), selfMap, ownerMap);
             bot.awayFromOwnerSince = 0;
         }
     }
@@ -529,7 +541,7 @@ public final class BotPartySupervisor {
         if (owner.getWorld() != SUPPORTED_WORLD) {
             return new Evaluation(0, "I only know people in the first world, sorry.");
         }
-        if (BotAccounts.botName(owner.getId(), MAX_BOTS_PER_OWNER - 1) == null) {
+        if (BotAccounts.botAccountName(owner.getId(), MAX_BOTS_PER_OWNER - 1) == null) {
             return new Evaluation(0, "Sorry, I can't find anyone for you.");
         }
         if (owner.getEventInstance() != null) {
@@ -583,19 +595,24 @@ public final class BotPartySupervisor {
         return botsByOwner.values().stream().mapToInt(List::size).sum();
     }
 
-    /** name -> last saved map, for this owner's bot characters that exist in the database. */
-    private static Map<String, Integer> loadBotCharacters(int ownerId) {
-        Map<String, Integer> result = new LinkedHashMap<>();
+    /** slot -> the companion character in that slot, for this owner's bot accounts that have one. */
+    private static Map<Integer, BotCharacter> loadBotCharacters(int ownerId) {
+        Map<Integer, BotCharacter> result = new LinkedHashMap<>();
         try (Connection con = DatabaseConnection.getConnection();
-             PreparedStatement ps = con.prepareStatement("SELECT name, map FROM characters WHERE name IN ("
-                     + String.join(", ", java.util.Collections.nCopies(MAX_BOTS_PER_OWNER, "?")) + ")")) {
+             PreparedStatement ps = con.prepareStatement(
+                     "SELECT a.name, c.name, c.map FROM accounts a JOIN characters c ON c.accountid = a.id"
+                             + " WHERE a.name IN ("
+                             + String.join(", ", java.util.Collections.nCopies(MAX_BOTS_PER_OWNER, "?")) + ")")) {
             for (int slot = 0; slot < MAX_BOTS_PER_OWNER; slot++) {
-                String name = BotAccounts.botName(ownerId, slot);
-                ps.setString(slot + 1, name == null ? "" : name);
+                String account = BotAccounts.botAccountName(ownerId, slot);
+                ps.setString(slot + 1, account == null ? "" : account);
             }
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    result.put(rs.getString(1), rs.getInt(2));
+                    int slot = BotAccounts.slotOfBotAccount(rs.getString(1));
+                    if (slot >= 0) {
+                        result.put(slot, new BotCharacter(rs.getString(2), rs.getInt(3)));
+                    }
                 }
             }
         } catch (SQLException e) {
@@ -603,4 +620,7 @@ public final class BotPartySupervisor {
         }
         return result;
     }
+
+    /** One companion that exists in the database: what it is called, and where it was last saved. */
+    private record BotCharacter(String name, int map) {}
 }

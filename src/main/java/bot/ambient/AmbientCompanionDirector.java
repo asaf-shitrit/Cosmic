@@ -144,7 +144,7 @@ public final class AmbientCompanionDirector {
 
         for (World world : server.getWorlds()) {
             for (Character chr : world.getPlayerStorage().getAllCharacters()) {
-                if (!chr.isLoggedinWorld() || chr.getMap() == null || HumanPresence.isBotName(chr.getName())) {
+                if (!chr.isLoggedinWorld() || chr.getMap() == null || HumanPresence.isBot(chr)) {
                     continue;
                 }
                 if (record(chr, now) && !sentThisTick) {
