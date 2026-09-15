@@ -8,6 +8,8 @@ import bot.ChannelSession;
 import bot.MapleConnection;
 import bot.Planner;
 import bot.WorldState;
+import client.Character;
+import net.server.Server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,9 +82,11 @@ final class SummonedBot implements Runnable {
 
     /** Set by the watchdog, also read by the NPC thread when counting free party seats. */
     volatile boolean joinedParty;
+    volatile boolean prepared;
+    volatile boolean placed;
+    volatile String activity = "arriving";
 
     // Watchdog-thread only.
-    boolean placed;
     int invitesSent;
     long lastInviteAt;
     long awayFromOwnerSince;
@@ -146,13 +150,14 @@ final class SummonedBot implements Runnable {
             WorldState world = new WorldState(session.charId());
             try (MapleConnection conn = session.connection()) {
                 charId = session.charId();
-                FollowPlanner follow = new FollowPlanner(ownerId, ownerName, slot);
+                CompanionPlanner companion = new CompanionPlanner(this, supervisor,
+                        () -> liveCharacter(charId), () -> liveCharacter(ownerId));
                 Planner planner = (w, self) -> {
                     // First SET_FIELD: the channel has handled our PLAYER_LOGGEDIN, so the next bot may go.
                     if (w.getMapChangeCount() > 0 && gateHeld.compareAndSet(true, false)) {
                         LOGIN_GATE.release();
                     }
-                    return follow.plan(w, self);
+                    return companion.plan(w, self);
                 };
                 BotSession.runGameLoop(conn, charId, planner, MAX_SESSION_MS, () -> stopRequested, world);
                 leavePartyCleanly(conn, world);
@@ -167,6 +172,13 @@ final class SummonedBot implements Runnable {
             }
             supervisor.onBotExit(this);
         }
+    }
+
+    private Character liveCharacter(int id) {
+        var world = Server.getInstance().getWorld(worldId);
+        Character character = world == null ? null : world.getPlayerStorage().getCharacterById(id);
+        return character != null && character.isLoggedinWorld()
+                && character.getClient().getChannel() == channel ? character : null;
     }
 
     /** Waits for {@link #LOGIN_GATE}, giving up only if this bot is stopped meanwhile. */

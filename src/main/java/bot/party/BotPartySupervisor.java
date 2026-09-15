@@ -1,6 +1,7 @@
 package bot.party;
 
 import bot.MapPortals;
+import bot.combat.CompanionLoadout;
 import client.Character;
 import net.server.PlayerStorage;
 import net.server.Server;
@@ -210,7 +211,11 @@ public final class BotPartySupervisor {
             Character online = storage.getCharacterByName(name);
             String line;
             if (online != null && online.isLoggedinWorld()) {
-                line = "online, ch " + online.getClient().getChannel() + ", #m" + online.getMapId() + "#";
+                line = "level " + online.getLevel() + ", ch " + online.getClient().getChannel()
+                        + ", #m" + online.getMapId() + "#";
+                if (active != null) {
+                    line += " - " + active.activity;
+                }
                 if (active != null && active.state() == SummonedBot.State.STOPPING) {
                     line += " (leaving)";
                 }
@@ -332,6 +337,20 @@ public final class BotPartySupervisor {
             return;             // between maps, or its logout is already under way
         }
 
+        if (!bot.prepared) {
+            // self was looked up by the id this summon's own connection logged in with, so it is the
+            // bot's character, never the owner or a bystander; prepare() checks the name again.
+            // Done once per summon, before CompanionPlanner is allowed to act.
+            try {
+                bot.prepared = CompanionLoadout.prepare(self, owner, bot.slot, bot.name);
+            } catch (RuntimeException e) {
+                // Not retried: a failure here would otherwise log once a second for the whole session.
+                log.warn("Couldn't prepare summoned bot {} for {}", bot.name, owner.getName(), e);
+                bot.requestStop("couldn't prepare this companion");
+            }
+            return;
+        }
+
         if (!bot.placed) {
             if (owner.getEventInstance() != null) {
                 return;
@@ -371,6 +390,44 @@ public final class BotPartySupervisor {
         }
 
         catchUp(bot, self, owner, now);
+    }
+
+    /**
+     * The human fills the leader role and all three managed companions fill the puzzle positions.
+     * Check instance identity as well as party membership: two parallel PQs share numeric map ids.
+     *
+     * @return null when {@code member} may play its part, otherwise why not (shown in "Who's
+     *         following me?" and logged, since a companion waiting here otherwise just stands still)
+     */
+    String kpqTeamProblem(SummonedBot member, Character self, Character owner) {
+        Party party = owner.getParty();
+        if (party == null || party.getLeaderId() != owner.getId()) {
+            return "you aren't leading the party";
+        }
+        if (party.getMembers().size() != 4) {
+            return "the party has " + party.getMembers().size() + " members, not 4";
+        }
+        if (owner.getEventInstance() == null || self.getEventInstance() != owner.getEventInstance()) {
+            return "not in the same party quest as you";
+        }
+        List<SummonedBot> companions = snapshotOf(member.ownerId);
+        if (companions.size() != 3) {
+            return companions.size() + " companions with you, not 3";
+        }
+        PlayerStorage storage = owner.getWorldServer().getPlayerStorage();
+        for (SummonedBot companion : companions) {
+            Character character = storage.getCharacterById(companion.charId);
+            if (companion.stopRequested || character == null) {
+                return companion.name + " is leaving";
+            }
+            if (!companion.joinedParty || character.getParty() == null || character.getParty().getId() != party.getId()) {
+                return companion.name + " isn't in your party";
+            }
+            if (character.getEventInstance() != owner.getEventInstance()) {
+                return companion.name + " isn't in your party quest";
+            }
+        }
+        return null;
     }
 
     /**

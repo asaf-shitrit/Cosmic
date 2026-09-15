@@ -53,6 +53,15 @@ public class OwnerHarness implements Planner {
         this.steps = new ArrayDeque<>(Arrays.asList(steps.split(",")));
     }
 
+    boolean exitRequested() {
+        return exitRequested;
+    }
+
+    /** Every step has run (or timed out) and there is nothing left to do. */
+    boolean idle() {
+        return step == null && steps.isEmpty();
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length < 6) {
             System.err.println("usage: OwnerHarness <host> <port> <user> <pass> <budgetSeconds> <step,step,...>");
