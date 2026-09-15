@@ -77,6 +77,7 @@ class ResidentPiecesTest {
         assertEquals("Hello there, traveller!", ResidentChat.sanitize("\"Hello there,\n traveller!\""));
         assertEquals("gm command attempt", ResidentChat.sanitize("//gm command attempt"));
         assertNull(ResidentChat.sanitize("\u2728\u2728"));
+        assertEquals("and more check my shop", ResidentChat.sanitize("and more\u2014check my shop"));
         assertTrue(ResidentChat.sanitize("word ".repeat(60)).length() <= ResidentChat.MAX_LINE);
         assertTrue(ResidentChat.addresses("hey Marigold, got elixirs?", "Marigold"));
         assertFalse(ResidentChat.addresses("marigolds are flowers", "Marigold"));

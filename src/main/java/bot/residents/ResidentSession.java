@@ -717,12 +717,30 @@ final class ResidentSession {
         ChatEvent event = chats.pollFirst();
         talkedTo.add(event.speaker());
         String remembered = memory.metPlayer(event.speaker(), Instant.now());
-        String shopSummary = decision.objective() instanceof Objective.RunShop shop
-                ? "\"" + shop.title() + "\", selling " + shop.listings().size() + " kinds of " + profile.speciality().name().toLowerCase()
-                : "no shop today";
+        String shopSummary = shopSummary();
         pendingFor = event;
         pendingReply = services.chatExecutor().submit(() -> ResidentChat.llmReply(services.gateway(), profile, event.speaker(),
                 event.message(), remembered, shopSummary, services.config().chatRepliesPerHour()));
+    }
+
+    /**
+     * What the merchant really lists, with real prices. Seen live: told only "selling 4 kinds of potions",
+     * the model quoted a White Potion price the shop didn't have.
+     */
+    private String shopSummary() {
+        HiredMerchant hm = FreeMarket.ownMerchant(WORLD_ID, charId);
+        if (hm == null) {
+            return "no shop open right now";
+        }
+        List<String> parts = new ArrayList<>();
+        for (PlayerShopItem it : new ArrayList<>(hm.getItems())) {
+            if (it.isExist() && it.getBundles() > 0) {
+                CatalogItem item = assessment.catalog.stream().filter(c -> c.itemId() == it.getItem().getItemId()).findFirst().orElse(null);
+                parts.add((item == null ? "item " + it.getItem().getItemId() : item.name()) + " x" + it.getItem().getQuantity()
+                        + " for " + it.getPrice() + " mesos");
+            }
+        }
+        return "\"" + hm.getDescription() + "\": " + (parts.isEmpty() ? "sold out" : String.join(", ", parts));
     }
 
     private void send(ChatEvent to, String line) throws IOException {

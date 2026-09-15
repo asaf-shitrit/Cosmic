@@ -25,7 +25,8 @@ public final class PromptBuilder {
             - Use only ids that appear in the request (candidate items, map ids from the knowledge excerpts, \
             the rule suggestion). Never invent ids.
             - Shop prices are mesos per bundle and must stay between 0.5x and 2x of that item's rulePrice.
-            - A RESIDENT character that has candidates must answer RunShop, listing some of its candidates.
+            - A RESIDENT character that has candidates must answer RunShop, listing at least half of maxListings \
+            candidates (or all of them if there are fewer).
             - Shop titles are at most 24 plain ASCII characters, written in the character's own voice.
             - Prefer the rule suggestion unless the persona, recent sales or the knowledge give a reason to \
             vary it. Variety should look like a real player's habits, not randomness.
