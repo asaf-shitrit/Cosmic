@@ -325,6 +325,9 @@ public class BotSession {
                 // cadence check below so an idle map still gets replanned on the periodic floor.
             }
 
+            // Queued chat only leaves on a driver tick (see Speech) - this is the tick.
+            executor.tick();
+
             long now = System.currentTimeMillis();
             boolean notableChange = world.getChangeVersion() != lastPlannedVersion;
             boolean floorElapsed = now - lastPlanAt >= REPLAN_FLOOR_MS;

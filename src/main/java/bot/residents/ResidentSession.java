@@ -618,6 +618,7 @@ final class ResidentSession {
         } catch (SocketTimeoutException e) {
             // quiet tick
         }
+        executor.tick();   // paced chat leaves only on a driver tick (see Speech)
         serviceChat();
     }
 
@@ -747,7 +748,8 @@ final class ResidentSession {
         if (to.whisper()) {
             conn.send(ShopPackets.whisper(to.speaker(), line));
         } else {
-            executor.execute(new Action.Say(line));
+            // A reply, not idle chatter: the speech layer pauses for the read before it types.
+            executor.execute(new Action.Reply(to.message(), line));
         }
     }
 
