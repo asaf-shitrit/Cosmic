@@ -16,7 +16,8 @@ import java.util.Set;
  * reason to fall back, not to fix the answer up silently:
  *
  * <ul>
- *   <li>{@code objective} must name a member of the closed vocabulary; unknown names are invalid</li>
+ *   <li>{@code objective} must name a member of the closed vocabulary; unknown names are invalid, and a
+ *       resident with a shop must answer {@code RunShop}</li>
  *   <li>ids must be positive integers; durations and quantities within sane bounds</li>
  *   <li>a shop plan may only list items the rules offered as candidates, at a price within
  *       {@link #MIN_PRICE_FACTOR}..{@link #MAX_PRICE_FACTOR} of the rule price, with the candidate's own
@@ -41,6 +42,11 @@ public final class ObjectiveCodec {
      */
     public static Objective decode(Map<String, Object> json, PlanningContext ctx) {
         String name = Json.asString(json.get("objective"), "objective");
+        if (ctx.role() == PlanningContext.Role.RESIDENT && ctx.shop() != null && !"RunShop".equals(name)) {
+            // Seen live: asked to plan an ores shop, the model answered Idle and the resident sat out a
+            // whole wake with an empty stall. A shopkeeper's wake plan is the shop.
+            throw new IllegalArgumentException("a resident with a shop must answer RunShop, not " + truncate(name));
+        }
         return switch (name) {
             case "TrainAt" -> {
                 int map = positiveInt(json.get("mapId"), "mapId");

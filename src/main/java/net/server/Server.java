@@ -22,6 +22,7 @@
 package net.server;
 
 import bot.party.BotPartySupervisor;
+import bot.residents.ResidentDirector;
 import client.Character;
 import client.Client;
 import client.Family;
@@ -955,6 +956,8 @@ public class Server {
             FakePlayerService.getInstance().start();
             populateTownsWithFakePlayers();
         }
+
+        ResidentDirector.startIfEnabled();
     }
 
     /**
@@ -1948,6 +1951,7 @@ public class Server {
         // Summoned bots are client threads in this JVM: log them out while the channels can still
         // process their party leave and disconnect, before the worlds start tearing down.
         BotPartySupervisor.shutdownIfRunning();
+        ResidentDirector.shutdownIfRunning();
         for (World w : getWorlds()) {
             w.shutdown();
         }

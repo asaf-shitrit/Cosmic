@@ -409,6 +409,40 @@ server:
     USE_FAKE_PLAYERS: true          #Spawns wandering fake players to make the world feel populated. They are cosmetic only - they cannot be talked to, traded with, or attacked.
     FAKE_PLAYERS_PER_TOWN: 6        #How many to scatter in each major town on startup, per channel. Set 0 to spawn none automatically (!fakeplayer <count> still works in-game).
 
+    #Live Bot Budget & LLM Configuration - shared by FM residents and, later, ambient locals and companions.
+    BOT_BUDGET_MAX_CONNECTED: 10        #Most real bot clients connected at once, of every kind together.
+    BOT_BUDGET_COMPANION_RESERVE: 3     #Slots background bots (residents, ambient locals) may never take, so summoning still works.
+    LLM_ENABLED: true                   #Master switch for LLM planning/chat. Without OPENROUTER_API_KEY in the environment, bots plan by rules only.
+    LLM_DAILY_CALL_CAP: 60              #LLM calls per day, all purposes. At the cap every bot falls back to rules and canned chat.
+    LLM_HOURLY_CALL_CAP: 20             #LLM calls per clock hour, all purposes.
+    LLM_REQUIRE_HUMAN_ONLINE: true      #No LLM calls while no human player is online.
+    LLM_PLAN_BASE_MAX_TOKENS: 1200      #max_tokens per planning request (the model reasons before answering, so this covers both)...
+    LLM_PLAN_PER_BOT_MAX_TOKENS: 500    #...plus this much per bot planned in the same request.
+    LLM_PLAN_MAX_BATCH: 4               #Bots planned together in one request.
+    LLM_PLAN_CACHE_TTL_MINUTES: 360     #How long an LLM plan is reused for bots in the same situation.
+    LLM_PLAN_FOR_VARIETY: true          #Ask the LLM for variety even where rules are confident (e.g. a resident's shop plan). False = rules unless unsure.
+    LLM_CHAT_REPLIES_PER_HOUR: 6        #LLM replies to players talking to a bot, per hour. Over the cap, bots answer with canned lines.
+    BOT_KNOWLEDGE_DIR: bot-knowledge    #OKF knowledge bundle for planning retrieval, relative to the server directory. Missing = no excerpts.
+    BOT_MEMORY_DIR: bot-memory          #OKF memory bundle (resident profiles and episodes). Missing = built-in cast, no episodes.
+
+    #FM Resident Configuration - long-lived AI traders with Hired Merchants in the Free Market.
+    USE_RESIDENTS: false                #Enables the resident traders.
+    RESIDENTS_CAST_SIZE: 14             #How many of the cast are active.
+    RESIDENTS_CHANNEL: 1                #Channel their shops open on.
+    RESIDENTS_MAX_AWAKE: 3              #Residents logged in at once (still bounded by the bot budget).
+    RESIDENTS_SLEEP_MIN_SECONDS: 7200   #Offline time between wakes, chosen uniformly between min and max.
+    RESIDENTS_SLEEP_MAX_SECONDS: 21600
+    RESIDENTS_SESSION_MIN_SECONDS: 300  #Length of one wake.
+    RESIDENTS_SESSION_MAX_SECONDS: 900
+    RESIDENTS_WAKE_GAP_SECONDS: 90      #Least time between two residents starting to wake - no login bursts.
+    RESIDENTS_STARTUP_DELAY_SECONDS: 120        #After server start, first wakes are spread between this delay...
+    RESIDENTS_CATCHUP_WINDOW_SECONDS: 1800      #...and this, since merchants close on shutdown and need reopening.
+    RESIDENTS_REQUIRE_HUMAN_ONLINE: true        #Scale to zero: nobody wakes while no human is online (open shops stay open).
+    RESIDENTS_DAILY_MESO_CAP: 150000    #Mesos residents together may pay players per day. These mesos are new money, so keep this low.
+    RESIDENTS_MAX_PURCHASES_PER_WAKE: 2 #Purchases from player shops one resident makes per wake.
+    RESIDENTS_BROWSE_CHANCE: 0.5        #Chance a resident browses player shops on a wake.
+    RESIDENTS_MAX_LISTINGS: 8           #Items per resident shop (a Hired Merchant holds 16).
+
     #Pet Auto-Pot Configuration
     USE_COMPULSORY_AUTOPOT: true    #Pets will consume as many potions as needed to fulfill the AUTOHP/MP ratio threshold.
     USE_EQUIPS_ON_AUTOPOT: true     #Player MaxHP and MaxMP check values on autopot handler will be updated by the HP/MP bonuses on equipped items.

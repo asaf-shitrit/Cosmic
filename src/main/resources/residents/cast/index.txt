@@ -1,0 +1,15 @@
+# Resident seed profiles, in cast order (RESIDENTS_CAST_SIZE takes the first N).
+Marigold
+Bramblewick
+Quillon
+Pennyroyal
+Oswin
+Juniper
+Thaddeus
+Wrenna
+Corvin
+Liesel
+Ambrose
+Tilly
+Hobart
+Rosalind

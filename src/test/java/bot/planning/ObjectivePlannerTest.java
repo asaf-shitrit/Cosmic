@@ -156,6 +156,15 @@ class ObjectivePlannerTest {
     }
 
     @Test
+    void aShopkeeperMayNotAnswerWithAnythingButItsShop() {
+        MutableClock clock = MutableClock.at("2026-09-15T12:00:00Z");
+        ScriptedLlm idler = new ScriptedLlm(p -> "{\"plans\":{\"Mira\":{\"objective\":\"Idle\",\"kind\":\"SIT\",\"seconds\":300}}}");
+        Decision d = planner(gateway(idler, 10), clock).plan(resident("Mira", List.of("cheerful")));
+        assertEquals(Decision.Path.FALLBACK, d.path());
+        assertInstanceOf(Objective.RunShop.class, d.objective());
+    }
+
+    @Test
     void codecRejectsUnknownObjectivesAndOutOfRangePrices() {
         PlanningContext ctx = resident("Mira", List.of("cheerful"));
         assertThrows(IllegalArgumentException.class, () -> ObjectiveCodec.decode(Map.of("objective", "Teleport", "mapId", 1L), ctx));
@@ -163,13 +172,15 @@ class ObjectivePlannerTest {
                 "{\"objective\":\"RunShop\",\"listings\":[{\"itemId\":2000002,\"bundles\":1,\"price\":100000}]}"), ctx));
         assertThrows(IllegalArgumentException.class, () -> ObjectiveCodec.decode(Json.parseObjectLenient(
                 "{\"objective\":\"RunShop\",\"listings\":[{\"itemId\":2000002,\"bundles\":11,\"price\":6400}]}"), ctx));
-        assertThrows(IllegalArgumentException.class, () -> ObjectiveCodec.decode(Map.of("objective", "Idle", "kind", "DANCE", "seconds", 10L), ctx));
-        Objective idle = ObjectiveCodec.decode(Map.of("objective", "Idle", "kind", "sit", "seconds", 30L), ctx);
+        assertThrows(IllegalArgumentException.class, () -> ObjectiveCodec.decode(Map.of("objective", "Idle", "kind", "DANCE", "seconds", 10L),
+                adventurer("Walt", 25, 1, Map.of(), 1000)));
+        PlanningContext walker = adventurer("Walt", 25, 1, Map.of(), 1000);
+        Objective idle = ObjectiveCodec.decode(Map.of("objective", "Idle", "kind", "sit", "seconds", 30L), walker);
         assertEquals(new Objective.Idle(Objective.IdleKind.SIT, 30), idle);
         assertEquals("Cheap pots come get em!!", ObjectiveCodec.sanitizeTitle("  Cheap\tpots ✨ come get em!!!!!!!!"));
         for (Objective o : List.of(idle, new Objective.TrainAt(105050000, List.of(2230101)), new Objective.Travel(100000000),
                 new Objective.BuyFrom("Hero", 2040002, 1, 9000), new Objective.Restock(2000000, 100), new Objective.SellTo(1011000))) {
-            assertEquals(o, ObjectiveCodec.decode(Json.asObject(Json.parse(Json.write(ObjectiveCodec.encode(o))), "o"), ctx));
+            assertEquals(o, ObjectiveCodec.decode(Json.asObject(Json.parse(Json.write(ObjectiveCodec.encode(o))), "o"), walker));
         }
     }
 

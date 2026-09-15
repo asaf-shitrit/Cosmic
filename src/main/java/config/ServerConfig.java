@@ -257,6 +257,40 @@ public class ServerConfig {
     public boolean USE_FAKE_PLAYERS;
     public int FAKE_PLAYERS_PER_TOWN;
 
+    //Live Bot Budget & LLM Configuration (defaults apply when a key is absent from config.yaml)
+    public int BOT_BUDGET_MAX_CONNECTED = 10;
+    public int BOT_BUDGET_COMPANION_RESERVE = 3;
+    public boolean LLM_ENABLED = true;
+    public int LLM_DAILY_CALL_CAP = 60;
+    public int LLM_HOURLY_CALL_CAP = 20;
+    public boolean LLM_REQUIRE_HUMAN_ONLINE = true;
+    public int LLM_PLAN_BASE_MAX_TOKENS = 1200;
+    public int LLM_PLAN_PER_BOT_MAX_TOKENS = 500;
+    public int LLM_PLAN_MAX_BATCH = 4;
+    public int LLM_PLAN_CACHE_TTL_MINUTES = 360;
+    public boolean LLM_PLAN_FOR_VARIETY = true;
+    public int LLM_CHAT_REPLIES_PER_HOUR = 6;
+    public String BOT_KNOWLEDGE_DIR = "bot-knowledge";
+    public String BOT_MEMORY_DIR = "bot-memory";
+
+    //FM Resident Configuration
+    public boolean USE_RESIDENTS = false;
+    public int RESIDENTS_CAST_SIZE = 14;
+    public int RESIDENTS_CHANNEL = 1;
+    public int RESIDENTS_MAX_AWAKE = 3;
+    public int RESIDENTS_SLEEP_MIN_SECONDS = 7200;
+    public int RESIDENTS_SLEEP_MAX_SECONDS = 21600;
+    public int RESIDENTS_SESSION_MIN_SECONDS = 300;
+    public int RESIDENTS_SESSION_MAX_SECONDS = 900;
+    public int RESIDENTS_WAKE_GAP_SECONDS = 90;
+    public int RESIDENTS_STARTUP_DELAY_SECONDS = 120;
+    public int RESIDENTS_CATCHUP_WINDOW_SECONDS = 1800;
+    public boolean RESIDENTS_REQUIRE_HUMAN_ONLINE = true;
+    public int RESIDENTS_DAILY_MESO_CAP = 150000;
+    public int RESIDENTS_MAX_PURCHASES_PER_WAKE = 2;
+    public double RESIDENTS_BROWSE_CHANCE = 0.5;
+    public int RESIDENTS_MAX_LISTINGS = 8;
+
     //Pet Auto-Pot Configuration
     public boolean USE_COMPULSORY_AUTOPOT;
     public boolean USE_EQUIPS_ON_AUTOPOT;
