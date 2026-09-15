@@ -290,7 +290,22 @@ public class FakePlayerService {
 
     /** Scatters {@code count} fake players across a map with a mixture of activities. */
     public int populate(MapleMap map, int count) {
-        return populate(map, count, TOWN_MIX);
+        return populate(map, count, looksLikeField(map) ? FIELD_MIX : TOWN_MIX);
+    }
+
+    /**
+     * Whether this map is somewhere people grind rather than somewhere they pass through. Mob spawn
+     * points are the difference that matters for placement: on a field a crowd belongs on the floor
+     * the mobs are on, in a town it belongs on the ground. Towns, the Free Market and PQ entrances
+     * have no spawn points at all, so this needs no list of map ids to consult.
+     *
+     * <p>Package-private so {@code FakePlayerServiceTest} can exercise it: populating for real needs
+     * Item.wz and the database.
+     */
+    boolean looksLikeField(MapleMap map) {
+        FootholdTree footholds = map.getFootholds();
+        int middle = (footholds.getMinDropX() + footholds.getMaxDropX()) / 2;
+        return nearestSpawnPoint(map, new Point(middle, footholds.getY1())) != null;
     }
 
     /**
