@@ -10,16 +10,21 @@ import client.inventory.Equip;
 import client.inventory.InventoryType;
 import client.inventory.Item;
 import client.inventory.WeaponType;
+import constants.skills.Archer;
 import constants.skills.Fighter;
 import constants.skills.Page;
 import constants.skills.Spearman;
 import server.StatEffect;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.random.RandomGenerator;
 
 /**
- * Feeds {@link DamageModel} with a character's own numbers - level, total stats, equipped weapon, gear
- * accuracy, mastery, buffs - so anything that changes those changes the damage it rolls. Two sources:
+ * Feeds {@link DamageModel} and {@link MagicDamageModel} with a character's own numbers - level, total
+ * stats, equipped weapon, gear accuracy, mastery, buffs - so anything that changes those changes the
+ * damage it rolls, and clamps every line to the ceiling {@code AbstractDealDamageHandler#parseDamage}
+ * computes for the same attack, so no line trips the server's damage-hack alert. Two sources:
  * a summoned companion's live server-side {@link Character}, and a standalone client's own view of
  * itself decoded off the wire ({@link WorldState.SelfStats}).
  */
@@ -29,10 +34,10 @@ public final class CombatMath {
     private CombatMath() {}
 
     /**
-     * One damage line for {@code skillDamagePercent} (100 for a basic attack) against {@code monsterId}:
-     * 0 for a miss. Never above the ceiling {@code AbstractDealDamageHandler#parseDamage} computes for the
-     * same attack ({@code calculateMaxBaseDamage(getTotalWatk())} times the skill's damage %), so it
-     * never trips the server's damage-hack alert.
+     * One melee damage line for {@code skillDamagePercent} (100 for a basic attack) against
+     * {@code monsterId}: 0 for a miss. Never above the ceiling {@code AbstractDealDamageHandler#parseDamage}
+     * computes for the same attack ({@code calculateMaxBaseDamage(getTotalWatk())} times the skill's
+     * damage %). No criticals: melee companions are warriors, which {@code canCrit} excludes.
      */
     public static int lineDamage(Character self, int skillDamagePercent, int monsterId, RandomGenerator rng) {
         int damage = DamageModel.roll(attacker(self), skillDamagePercent, MobDefense.of(monsterId), rng);
@@ -56,6 +61,86 @@ public final class CombatMath {
         return DamageModel.roll(attacker, 100, target, rng);
     }
 
+    /**
+     * The lines of one bow attack: {@code effect} null for a plain shot (100%, one arrow), else the
+     * skill's damage % over {@code max(bulletCount, attackCount)} lines (Double Shot: 2), the most lines
+     * {@code parseDamage} accepts for it without a "Too many lines" autoban point. A Critical Shot crit
+     * rolls with its bonus added and may pass the plain ceiling, but never twice it.
+     */
+    public static List<Integer> rangedLines(Character self, StatEffect effect, int monsterId, RandomGenerator rng) {
+        int percent = effect == null ? 100 : effect.getDamage();
+        int count = effect == null ? 1 : Math.max(effect.getBulletCount(), effect.getAttackCount());
+        long serverCeiling = (long) self.calculateMaxBaseDamage(self.getTotalWatk()) * percent / 100;
+        DamageModel.Attacker attacker = attacker(self);
+        DamageModel.Critical critical = criticalShot(self);
+        DamageModel.Target target = MobDefense.of(monsterId);
+        boolean serverAllowsCrit = serverAllowsCrit(self.getJob());
+        List<Integer> lines = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            lines.add(clampToServer(DamageModel.roll(attacker, percent, critical, target, rng), serverCeiling,
+                    serverAllowsCrit));
+        }
+        return lines;
+    }
+
+    /**
+     * The lines of one attack spell cast at {@code skillLevel}: {@code effect.getAttackCount()} of them
+     * (Magic Claw: 2), each clamped to {@link #serverMagicCeiling}.
+     */
+    public static List<Integer> magicLines(Character self, StatEffect effect, int skillLevel, int monsterId,
+                                           RandomGenerator rng) {
+        MagicDamageModel.Caster caster = new MagicDamageModel.Caster(self.getLevel(), self.getTotalMagic(),
+                self.getTotalInt(), self.getTotalLuk(), masteryPercentForLevel(skillLevel), effect.getMatk());
+        long ceiling = serverMagicCeiling(self.getTotalMagic(), self.getTotalInt(), effect.getMatk());
+        DamageModel.Target target = MobDefense.of(monsterId);
+        int count = Math.max(1, effect.getAttackCount());
+        List<Integer> lines = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            lines.add((int) Math.min(MagicDamageModel.roll(caster, target, rng), ceiling));
+        }
+        return lines;
+    }
+
+    /**
+     * {@code parseDamage}'s magic ceiling, which is not the client formula:
+     * {@code (ceil((MAGIC * ceil(MAGIC / 1000) + MAGIC) / 30) + ceil(INT / 200)) * mad}. For any MAGIC up
+     * to the server's 2000 cap it is at or above the client's max, so it only binds on a rounding edge.
+     * Buffs whose {@code damage} isn't 100 would scale it too; a companion has none.
+     */
+    static long serverMagicCeiling(int totalMagic, int totalInt, int spellAttack) {
+        long base = (long) (Math.ceil((totalMagic * Math.ceil(totalMagic / 1000.0) + totalMagic) / 30.0)
+                + Math.ceil(totalInt / 200.0));
+        return base * spellAttack;
+    }
+
+    /**
+     * {@code parseDamage} lets a line reach {@code 2 x} its ceiling without an alert only for a job that
+     * can crit ({@code canCrit}), and shows any line above the plain ceiling as a critical hit. Everyone
+     * else stays at the plain ceiling.
+     */
+    static int clampToServer(DamageModel.Line line, long serverCeiling, boolean serverAllowsCrit) {
+        long cap = line.critical() && serverAllowsCrit ? 2 * serverCeiling : serverCeiling;
+        return (int) Math.min(line.damage(), cap);
+    }
+
+    /** The explorer part of {@code parseDamage}'s {@code canCrit}: bowmen and thieves. */
+    static boolean serverAllowsCrit(Job job) {
+        return job != null && (job.isA(Job.BOWMAN) || job.isA(Job.THIEF));
+    }
+
+    /** Critical Shot, bowmen only: its {@code prop} is the chance and its {@code damage} the crit's total %. */
+    static DamageModel.Critical criticalShot(Character self) {
+        StatEffect effect = bowmanPassive(self, Archer.CRITICAL_SHOT);
+        return effect == null ? DamageModel.Critical.NONE
+                : new DamageModel.Critical(effect.getProp(), effect.getDamage() - 100);
+    }
+
+    private static StatEffect bowmanPassive(Character self, int skillId) {
+        int level = self.getJob().isA(Job.BOWMAN) ? self.getSkillLevel(skillId) : 0;
+        Skill skill = level > 0 ? SkillFactory.getSkill(skillId) : null;
+        return skill == null ? null : skill.getEffect(level);
+    }
+
     static DamageModel.Attacker attacker(Character self) {
         Item weapon = self.getInventory(InventoryType.EQUIPPED).getItem(WEAPON_SLOT);
         int gearAccuracy = 0;
@@ -66,10 +151,13 @@ public final class CombatMath {
         }
         Integer buffAccuracy = self.getBuffedValue(BuffStat.ACC);
         MasterySkill mastery = masterySkill(self, weapon);
+        // The Blessing of Amazon: passive accuracy, its x (300.img 3000000: level 1 -> 1, 15 -> 15).
+        StatEffect amazon = bowmanPassive(self, Archer.BLESSING_OF_AMAZON);
         return attacker(self.getLevel(), self.getJob(), self.getTotalStr(), self.getTotalDex(), self.getTotalInt(),
                 self.getTotalLuk(), weapon == null ? 0 : weapon.getItemId(), self.getTotalWatk(),
                 masteryPercentForLevel(mastery.level()),
-                gearAccuracy + (buffAccuracy == null ? 0 : buffAccuracy) + mastery.accuracy());
+                gearAccuracy + (buffAccuracy == null ? 0 : buffAccuracy) + mastery.accuracy()
+                        + (amazon == null ? 0 : amazon.getX()));
     }
 
     /** The stat pairs and weapon multipliers of {@code Character#calculateMaxBaseDamage}, which the model's max must agree with. */
@@ -91,8 +179,11 @@ public final class CombatMath {
             primary = str;
             secondary = dex;
         }
+        int accuracy = job != null && (job.isA(Job.BOWMAN) || job.isA(Job.THIEF))
+                ? DamageModel.bowmanAccuracy(dex, luk, bonusAccuracy)
+                : DamageModel.accuracy(dex, luk, bonusAccuracy);
         return new DamageModel.Attacker(level, primary, secondary, type.getMaxDamageMultiplier(), watk,
-                masteryPercent, DamageModel.accuracy(dex, luk, bonusAccuracy));
+                masteryPercent, accuracy);
     }
 
     private static final WeaponType[] WEAPON_CATEGORIES = {

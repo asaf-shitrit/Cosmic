@@ -7,6 +7,7 @@ import java.util.SplittableRandom;
 import java.util.random.RandomGenerator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DamageModelTest {
@@ -88,6 +89,65 @@ class DamageModelTest {
     @Test
     void sameSeedSameRolls() {
         assertTrue(Arrays.equals(rolls(spearman(30, 32, 0), 195, LIGATOR, 9), rolls(spearman(30, 32, 0), 195, LIGATOR, 9)));
+    }
+
+    /** A level-25 bowman as CompanionLoadout makes one: DEX 100, STR 28, Hunter's Bow (35 WATK, x3.4), no mastery. */
+    private static DamageModel.Attacker bowman() {
+        return new DamageModel.Attacker(25, 100, 28, 3.4, 35, DamageModel.BASE_MASTERY_PERCENT,
+                DamageModel.bowmanAccuracy(100, 4, 5 + 5));     // Brown Bandana +5, Blessing of Amazon 5 +5
+    }
+
+    @Test
+    void bowDamageUsesDexAndStrWithTheBowMultiplierAndBowmanAccuracy() {
+        DamageModel.Attacker a = bowman();
+        // ceil((3.4 * 100 + 28) / 100 * 35) = ceil(128.8); ceil((3.4 * 100 * 0.9 * 0.10 + 28) / 100 * 35) = ceil(20.51)
+        assertEquals(129, DamageModel.maxBase(a));
+        assertEquals(21, DamageModel.minBase(a));
+        // DEX x 0.6 + LUK x 0.3 for bowmen, against DEX x 0.8 + LUK x 0.5 for warriors
+        assertEquals(61, DamageModel.bowmanAccuracy(100, 4, 0));
+        assertEquals(82, DamageModel.accuracy(100, 4, 0));
+        assertEquals(71, a.accuracy());
+    }
+
+    @Test
+    void criticalShotAddsItsBonusToTheSkillPercentAtItsRate() {
+        DamageModel.Attacker a = bowman();
+        DamageModel.Critical critical = new DamageModel.Critical(0.4, 100);   // Critical Shot level 20
+        RandomGenerator rng = new SplittableRandom(11);
+        int crits = 0;
+        int critAbovePlainCeiling = 0;
+        for (int i = 0; i < SAMPLES; i++) {
+            DamageModel.Line line = DamageModel.roll(a, 130, critical, DUMMY, rng);   // Double Shot level 20
+            if (line.critical()) {
+                crits++;
+                assertTrue(line.damage() <= DamageModel.ceiling(a, 230), "crit " + line.damage());
+                critAbovePlainCeiling += line.damage() > DamageModel.ceiling(a, 130) ? 1 : 0;
+            } else {
+                assertTrue(line.damage() <= DamageModel.ceiling(a, 130), "line " + line.damage());
+            }
+        }
+        assertEquals(0.4, (double) crits / SAMPLES, 0.02);
+        assertTrue(critAbovePlainCeiling > crits / 4, critAbovePlainCeiling + " of " + crits);
+        assertEquals(296, DamageModel.ceiling(a, 230));
+        assertEquals(167, DamageModel.ceiling(a, 130));
+
+        RandomGenerator none = new SplittableRandom(11);
+        for (int i = 0; i < 1000; i++) {
+            assertFalse(DamageModel.roll(a, 130, DamageModel.Critical.NONE, DUMMY, none).critical());
+        }
+    }
+
+    @Test
+    void theServerCeilingCapsLinesAndOnlyCritCapableJobsGetTwiceIt() {
+        assertEquals(300, CombatMath.clampToServer(new DamageModel.Line(300, true), 167, true));
+        assertEquals(334, CombatMath.clampToServer(new DamageModel.Line(400, true), 167, true));
+        assertEquals(167, CombatMath.clampToServer(new DamageModel.Line(300, true), 167, false));
+        assertEquals(167, CombatMath.clampToServer(new DamageModel.Line(200, false), 167, true));
+        assertEquals(0, CombatMath.clampToServer(new DamageModel.Line(0, false), 167, true));
+        assertTrue(CombatMath.serverAllowsCrit(client.Job.BOWMAN));
+        assertTrue(CombatMath.serverAllowsCrit(client.Job.HUNTER));
+        assertFalse(CombatMath.serverAllowsCrit(client.Job.WARRIOR));
+        assertFalse(CombatMath.serverAllowsCrit(client.Job.MAGICIAN));
     }
 
     private static int[] hitsOnly(int[] r) {

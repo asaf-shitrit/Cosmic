@@ -11,7 +11,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * A monster's level, weapon defence and avoid, read from the monster's WZ entry the way a client has
+ * A monster's level, weapon and magic defence and avoid, read from the monster's WZ entry the way a client has
  * them. Avoid in particular isn't available elsewhere: the server's {@code MonsterStats} doesn't load
  * {@code eva}, because the server never decides hits.
  */
@@ -41,6 +41,7 @@ public final class MobDefense {
         }
         return new DamageModel.Target(DataTool.getIntConvert("info/level", mob, 1),
                 DataTool.getIntConvert("info/PDDamage", mob, 0),
-                DataTool.getIntConvert("info/eva", mob, 0));
+                DataTool.getIntConvert("info/eva", mob, 0),
+                DataTool.getIntConvert("info/MDDamage", mob, 0));
     }
 }
