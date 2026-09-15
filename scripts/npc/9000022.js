@@ -78,7 +78,7 @@ function action(mode, type, selection) {
             return;
         }
 
-        var text = "I can send you directly down an Explorer path. Which path do you want to begin?";
+        var text = "I'm Avoda. I can send you directly down an Explorer path. Which path do you want to begin?";
         for (var i = 0; i < jobs.length; i++) {
             text += "\r\n#L" + i + "##b" + jobs[i].name + "#k (later " + jobs[i].future + ")#l";
         }
