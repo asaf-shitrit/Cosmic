@@ -27,6 +27,7 @@ public class ActionExecutor {
             case Action.TalkToNpc talk -> talkToNpc(talk.npcObjectId());
             case Action.Say say -> say(say.message());
             case Action.CreateParty ignored -> createParty();
+            case Action.LeaveParty ignored -> leaveParty();
             case Action.InviteToParty invite -> inviteToParty(invite.characterName());
             case Action.AcceptPartyInvite accept -> acceptPartyInvite(accept.partyId());
             case Action.RespondToNpc respond -> respondToNpc(respond.lastMsgType(), respond.proceed(), respond.selection());
@@ -34,6 +35,7 @@ public class ActionExecutor {
             case Action.PickupItem pickup -> pickupItem(pickup.objectId());
             case Action.DropItem drop -> dropItem(drop.itemId(), drop.quantity());
             case Action.UsePortal usePortal -> usePortal(usePortal.portalName());
+            case Action.ChangeChannel cc -> changeChannel(cc.channel());
             case Action.Idle ignored -> { /* nothing to send */ }
         }
     }
@@ -100,6 +102,13 @@ public class ActionExecutor {
     private void createParty() throws IOException {
         OutPacket p = MapleConnection.packet(RecvOpcode.PARTY_OPERATION.getValue());
         p.writeByte(1);
+        conn.send(p);
+    }
+
+    /** {@code PartyOperationHandler} operation 2 - no further payload. */
+    private void leaveParty() throws IOException {
+        OutPacket p = MapleConnection.packet(RecvOpcode.PARTY_OPERATION.getValue());
+        p.writeByte(2);
         conn.send(p);
     }
 
@@ -202,6 +211,14 @@ public class ActionExecutor {
         p.writeShort(slot.get());
         p.writeShort(0);                 // action == 0 selects InventoryManipulator.drop
         p.writeShort(quantity);
+        conn.send(p);
+    }
+
+    /** {@code ChangeChannelHandler}: byte zero-indexed channel, int (read and ignored). */
+    private void changeChannel(int channel) throws IOException {
+        OutPacket p = MapleConnection.packet(RecvOpcode.CHANGE_CHANNEL.getValue());
+        p.writeByte(channel - 1);
+        p.writeInt(0);
         conn.send(p);
     }
 

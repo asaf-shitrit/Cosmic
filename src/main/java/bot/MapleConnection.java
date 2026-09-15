@@ -170,7 +170,7 @@ public class MapleConnection implements Closeable {
         purgeExpired(now);
 
         if (recentSendTimes.size() >= MAX_PACKETS_PER_SECOND) {
-            System.err.println("[WARN] MapleConnection: outbound rate limit hit (" + MAX_PACKETS_PER_SECOND
+            BotLog.line("[WARN] MapleConnection: outbound rate limit hit (" + MAX_PACKETS_PER_SECOND
                     + "/sec) - throttling. A caller is retrying far faster than any legitimate action "
                     + "needs; this is almost certainly a missing cooldown upstream, not a real workload.");
             while (recentSendTimes.size() >= MAX_PACKETS_PER_SECOND) {
@@ -278,6 +278,12 @@ public class MapleConnection implements Closeable {
         return ServerConstants.VERSION;
     }
 
+    /**
+     * Safe to call from a thread other than the one blocked in {@link #receive()}: closing the socket
+     * is what unblocks that read (it throws), which is how a supervisor stops a bot that is stuck
+     * mid-login rather than in its game loop. Deliberately not {@code synchronized} for that reason -
+     * {@link #receive()} holds this object's monitor while it blocks.
+     */
     @Override
     public void close() throws IOException {
         socket.close();

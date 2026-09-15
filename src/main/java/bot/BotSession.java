@@ -9,6 +9,8 @@ import java.awt.Point;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.security.SecureRandom;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
  * Drives a hand-rolled v83 client all the way from an unauthenticated TCP connection to standing
@@ -90,8 +92,8 @@ public class BotSession {
         String user = args.length > 2 ? args[2] : "bot";
         String pass = args.length > 3 ? args[3] : "bot";
 
-        System.out.println("=== BotSession ===");
-        System.out.printf("connecting to %s:%d as '%s'%n", host, loginPort, user);
+        BotLog.line("=== BotSession ===");
+        BotLog.linef("connecting to %s:%d as '%s'%n", host, loginPort, user);
 
         ChannelSession session = loginAndEnterChannel(host, loginPort, user, pass);
         try (MapleConnection channel = session.connection()) {
@@ -107,6 +109,20 @@ public class BotSession {
      */
     public static ChannelSession loginAndEnterChannel(String host, int loginPort, String user, String pass)
             throws IOException {
+        return loginAndEnterChannel(host, loginPort, user, pass, CHANNEL, conn -> { });
+    }
+
+    /**
+     * As {@link #loginAndEnterChannel(String, int, String, String)}, but onto a chosen channel
+     * ({@code channel} is zero-indexed, as on the wire) and reporting every connection it opens to
+     * {@code onConnect} before blocking on it. The callback exists so a supervisor on another thread
+     * can close a connection that is stuck mid-login - see {@link MapleConnection#close()}.
+     *
+     * @throws LoginRejectedException if the login server answers LOGIN_PASSWORD with a failure code.
+     */
+    public static ChannelSession loginAndEnterChannel(String host, int loginPort, String user, String pass,
+                                                      int channel, Consumer<MapleConnection> onConnect)
+            throws IOException {
         String hostString = randomHostString();
         String macs = "00-00-00-00-00-00";
 
@@ -114,40 +130,38 @@ public class BotSession {
         int channelPort;
 
         try (MapleConnection login = MapleConnection.connect(host, loginPort, TIMEOUT_MS)) {
-            System.out.println("[ok]   login handshake complete, server version v" + login.getServerVersion());
+            onConnect.accept(login);
+            BotLog.line("[ok]   login handshake complete, server version v" + login.getServerVersion());
 
             sendLogin(login, user, pass);
-            System.out.println("[sent] LOGIN_PASSWORD");
+            BotLog.line("[sent] LOGIN_PASSWORD");
 
             int accountId = readLoginStatus(login);
-            if (accountId < 0) {
-                throw new IOException("login rejected - see LOGIN_STATUS reason code above");
-            }
-            System.out.println("[ok]   authenticated, account id " + accountId);
+            BotLog.line("[ok]   authenticated, account id " + accountId);
 
             login.send(MapleConnection.packet(RecvOpcode.SERVERLIST_REQUEST.getValue()));
             drainServerList(login);
-            System.out.println("[ok]   server list received");
+            BotLog.line("[ok]   server list received");
 
             OutPacket charListReq = MapleConnection.packet(RecvOpcode.CHARLIST_REQUEST.getValue());
             charListReq.writeByte(0);       // leading byte the handler reads and discards
             charListReq.writeByte(WORLD);
-            charListReq.writeByte(CHANNEL);
+            charListReq.writeByte(channel);
             login.send(charListReq);
-            System.out.println("[sent] CHARLIST_REQUEST world=" + WORLD + " channel=" + CHANNEL);
+            BotLog.line("[sent] CHARLIST_REQUEST world=" + WORLD + " channel=" + channel);
 
             InPacket charList = receiveUntil(login, SendOpcode.CHARLIST.getValue());
             charList.readByte();            // status
             int count = charList.readByte() & 0xFF;
-            System.out.println("[ok]   character list received, " + count + " character(s) on this account");
+            BotLog.line("[ok]   character list received, " + count + " character(s) on this account");
 
             if (count == 0) {
                 String charName = deriveCharName(user);
                 charId = createCharacter(login, charName);
-                System.out.println("[ok]   created character '" + charName + "', id " + charId);
+                BotLog.line("[ok]   created character '" + charName + "', id " + charId);
             } else {
                 charId = charList.readInt();    // addCharEntry -> addCharStats starts with the charId int
-                System.out.println("[ok]   reusing existing character id " + charId);
+                BotLog.line("[ok]   reusing existing character id " + charId);
             }
 
             OutPacket select = MapleConnection.packet(RecvOpcode.CHAR_SELECT.getValue());
@@ -155,23 +169,39 @@ public class BotSession {
             select.writeString(macs);
             select.writeString(hostString);
             login.send(select);
-            System.out.println("[sent] CHAR_SELECT charId=" + charId);
+            BotLog.line("[sent] CHAR_SELECT charId=" + charId);
 
             channelPort = readServerIpPort(login);
-            System.out.println("[ok]   SERVER_IP received, channel port " + channelPort
+            BotLog.line("[ok]   SERVER_IP received, channel port " + channelPort
                     + " (advertised address ignored - config.yaml HOST is a LAN IP we reconnect around)");
         }
-        System.out.println("[ok]   closed login connection");
+        BotLog.line("[ok]   closed login connection");
 
-        MapleConnection channel = MapleConnection.connect(host, channelPort, TIMEOUT_MS);
-        System.out.println("[ok]   channel handshake complete, server version v" + channel.getServerVersion());
+        MapleConnection channelConn = MapleConnection.connect(host, channelPort, TIMEOUT_MS);
+        onConnect.accept(channelConn);
+        BotLog.line("[ok]   channel handshake complete, server version v" + channelConn.getServerVersion());
 
         OutPacket loggedIn = MapleConnection.packet(RecvOpcode.PLAYER_LOGGEDIN.getValue());
         loggedIn.writeInt(charId);
-        channel.send(loggedIn);
-        System.out.println("[sent] PLAYER_LOGGEDIN charId=" + charId);
+        channelConn.send(loggedIn);
+        BotLog.line("[sent] PLAYER_LOGGEDIN charId=" + charId);
 
-        return new ChannelSession(channel, charId);
+        return new ChannelSession(channelConn, charId);
+    }
+
+    /** LOGIN_STATUS came back with a non-zero reason ({@code PacketCreator.getLoginFailed} codes). */
+    public static class LoginRejectedException extends IOException {
+        private final int reason;
+
+        public LoginRejectedException(int reason) {
+            super("login rejected, LOGIN_STATUS reason " + reason);
+            this.reason = reason;
+        }
+
+        /** 7 = account already logged in - transient right after that account disconnects. */
+        public int reason() {
+            return reason;
+        }
     }
 
     /**
@@ -186,17 +216,17 @@ public class BotSession {
         Planner planner = new ScriptedPlanner("Hello, world! (bot " + charId + " reporting in)");
         GameLoopResult result = runGameLoop(conn, charId, planner, GAME_LOOP_BUDGET_MS);
 
-        System.out.println();
-        System.out.println(result.sawSetField()
+        BotLog.line("");
+        BotLog.line(result.sawSetField()
                 ? "[ok]   confirmed in-world (SET_FIELD observed)"
                 : "[WARN] never saw SET_FIELD - character may not have fully entered the world");
-        System.out.println(result.sawPingPong()
+        BotLog.line(result.sawPingPong()
                 ? "[ok]   confirmed keepalive works (PING answered with PONG, no disconnect)"
                 : "[WARN] no PING observed within the wait window - keepalive not verified this run");
-        System.out.println("[ok]   final position (as last commanded): " + result.world().getSelfPosition());
+        BotLog.line("[ok]   final position (as last commanded): " + result.world().getSelfPosition());
 
         if (result.sawSetField() && result.sawPingPong()) {
-            System.out.println("BOT SESSION PASSED - character is in the world and survives the server's keepalive.");
+            BotLog.line("BOT SESSION PASSED - character is in the world and survives the server's keepalive.");
         }
     }
 
@@ -217,12 +247,23 @@ public class BotSession {
      */
     public static GameLoopResult runGameLoop(MapleConnection conn, int charId, Planner planner, long budgetMs)
             throws IOException {
+        return runGameLoop(conn, charId, planner, budgetMs, () -> false, new WorldState(charId));
+    }
+
+    /**
+     * As {@link #runGameLoop(MapleConnection, int, Planner, long)}, but also returns early once
+     * {@code stopRequested} says so (checked every {@link #READ_TICK_MS}, so a stop lands within about
+     * a quarter second) and runs against a caller-supplied {@link WorldState}, so a caller can still
+     * act on what the bot perceived after the loop exits - e.g. leave its party before disconnecting.
+     */
+    public static GameLoopResult runGameLoop(MapleConnection conn, int charId, Planner planner, long budgetMs,
+                                             BooleanSupplier stopRequested, WorldState world)
+            throws IOException {
         conn.setReadTimeoutMs(READ_TICK_MS);
 
-        WorldState world = new WorldState(charId);
         ActionExecutor executor = new ActionExecutor(conn, world);
 
-        System.out.println("[..]   entering game loop, watching for world entry (keepalive is MapleConnection's job now)");
+        BotLog.line("[..]   entering game loop, watching for world entry (keepalive is MapleConnection's job now)");
         long deadline = System.currentTimeMillis() + budgetMs;
         boolean sawSetField = false;
         int lastPlannedVersion = -1;
@@ -238,7 +279,7 @@ public class BotSession {
         // telling those two apart meant re-instrumenting and re-running instead of just reading the log.
         final long HEARTBEAT_MS = 5000;
 
-        while (System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline && !stopRequested.getAsBoolean()) {
             try {
                 InPacket p = conn.receive();
                 int opcode = p.readShort() & 0xFFFF;
@@ -251,8 +292,8 @@ public class BotSession {
                     // player storage and map; the same opcode is reused for every later map change
                     // (Character#changeMap -> PacketCreator.getWarpToMap) - see onMapChanged javadoc.
                     sawSetField = true;
-                    world.onMapChanged();
-                    System.out.println("[ok]   received SET_FIELD - character entered the world/a new map");
+                    world.onSetField(p);
+                    BotLog.line("[ok]   received SET_FIELD - now on map " + world.getSelfMapId());
 
                     // Character#changeMap sets mapTransitioning=true on every single map change (not
                     // just login), and ChangeMapHandler refuses to process ANY further CHANGE_MAP
@@ -269,7 +310,7 @@ public class BotSession {
                 } else {
                     String note = world.accept(opcode, p);
                     if (note != null) {
-                        System.out.println("[world] " + note);
+                        BotLog.line("[world] " + note);
                     }
                 }
             } catch (SocketTimeoutException e) {
@@ -288,7 +329,7 @@ public class BotSession {
                 forceReplan = false;
 
                 if (!(action instanceof Action.Idle)) {
-                    System.out.println("[plan]  " + action);
+                    BotLog.line("[plan]  " + action);
                     executor.execute(action);
                     forceReplan = true;   // objective step just completed - replan promptly, not on the floor
                 } else if (now - lastHeartbeatAt >= HEARTBEAT_MS) {
@@ -296,7 +337,7 @@ public class BotSession {
                     // all-Idle run - whether genuinely waiting or a stuck planner - prints nothing at
                     // all after world entry, which is exactly the ambiguity this exists to remove.
                     lastHeartbeatAt = now;
-                    System.out.println("[tick]  plan #" + planTicks + ": Idle (loop is ticking; planner has nothing to do)");
+                    BotLog.line("[tick]  plan #" + planTicks + ": Idle (loop is ticking; planner has nothing to do)");
                 }
             }
         }
@@ -322,7 +363,7 @@ public class BotSession {
         p.writeInt(WEAPON);
         p.writeByte(GENDER);
         login.send(p);
-        System.out.println("[sent] CREATE_CHAR name=" + name);
+        BotLog.line("[sent] CREATE_CHAR name=" + name);
 
         InPacket reply = receiveUntil(login, SendOpcode.ADD_NEW_CHAR_ENTRY.getValue());
         reply.readByte();               // addNewCharEntry's leading byte (always 0)
@@ -349,7 +390,7 @@ public class BotSession {
                 int reason = p.readShort();
                 throw new IOException("CHAR_SELECT rejected, error reason " + reason);
             }
-            System.out.printf("[..]   skipping opcode 0x%02X while waiting for SERVER_IP%n", opcode);
+            BotLog.linef("[..]   skipping opcode 0x%02X while waiting for SERVER_IP%n", opcode);
         }
     }
 
@@ -363,14 +404,17 @@ public class BotSession {
         conn.send(p);
     }
 
-    /** Same shape as {@code LoginSpike#readLoginStatus}: accepts ToS on a fresh auto-registered account. */
+    /**
+     * Same shape as {@code LoginSpike#readLoginStatus}: accepts ToS on a fresh auto-registered account.
+     * Returns the account id, or throws {@link LoginRejectedException} carrying the failure code.
+     */
     private static int readLoginStatus(MapleConnection conn) throws IOException {
         boolean acceptedToS = false;
         while (true) {
             InPacket p = conn.receive();
             int opcode = p.readShort();
             if (opcode != SendOpcode.LOGIN_STATUS.getValue()) {
-                System.out.printf("[..]   ignoring opcode 0x%02X while waiting for LOGIN_STATUS%n", opcode);
+                BotLog.linef("[..]   ignoring opcode 0x%02X while waiting for LOGIN_STATUS%n", opcode);
                 continue;
             }
 
@@ -382,13 +426,13 @@ public class BotSession {
                 OutPacket tos = MapleConnection.packet(RecvOpcode.ACCEPT_TOS.getValue());
                 tos.writeByte(1);
                 conn.send(tos);
-                System.out.println("[sent] ACCEPT_TOS (new account needs to accept the terms)");
+                BotLog.line("[sent] ACCEPT_TOS (new account needs to accept the terms)");
                 continue;
             }
 
             if (reason != 0) {
-                System.out.println("[FAIL] LOGIN_STATUS reason code " + reason);
-                return -1;
+                BotLog.line("[FAIL] LOGIN_STATUS reason code " + reason);
+                throw new LoginRejectedException(reason);
             }
             return p.readInt();
         }
@@ -400,7 +444,7 @@ public class BotSession {
             InPacket p = conn.receive();
             int opcode = p.readShort();
             if (opcode != SendOpcode.SERVERLIST.getValue()) {
-                System.out.printf("[..]   ignoring opcode 0x%02X while reading the server list%n", opcode);
+                BotLog.linef("[..]   ignoring opcode 0x%02X while reading the server list%n", opcode);
                 continue;
             }
             if ((p.readByte() & 0xFF) == 0xFF) {   // list terminator
@@ -421,7 +465,7 @@ public class BotSession {
             if (opcode == wantedOpcode) {
                 return p;
             }
-            System.out.printf("[..]   skipping opcode 0x%02X%n", opcode);
+            BotLog.linef("[..]   skipping opcode 0x%02X%n", opcode);
         }
     }
 

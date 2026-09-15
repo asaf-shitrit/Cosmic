@@ -42,6 +42,12 @@ public sealed interface Action {
     record InviteToParty(String characterName) implements Action {}
 
     /**
+     * Leaves the current party. {@code PartyOperationHandler} operation 2, no payload; if this bot is
+     * the leader, the server disbands the party instead ({@code Party.leaveParty}).
+     */
+    record LeaveParty() implements Action {}
+
+    /**
      * Accepts a pending party invite for {@code partyId}. {@code PartyOperationHandler} operation 3 -
      * the id must match one {@link WorldState#getPendingPartyInvite()} actually observed, since the
      * server resolves it via {@code InviteCoordinator} rather than trusting the id blindly.
@@ -100,6 +106,15 @@ public sealed interface Action {
      * packet-level error.
      */
     record UsePortal(String portalName) implements Action {}
+
+    /**
+     * Asks to move to another channel ({@code channel} is 1-based, as players count them).
+     * {@code ChangeChannelHandler} reads a zero-indexed byte and an unused int; asking for the current
+     * channel is treated as a hack and disconnects. The server answers with a channel-change packet
+     * pointing at the new channel's port - following it (reconnecting) is not implemented, so after
+     * this the bot is effectively logged out.
+     */
+    record ChangeChannel(int channel) implements Action {}
 
     /** Nothing to do this tick. */
     record Idle() implements Action {}

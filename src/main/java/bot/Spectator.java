@@ -31,6 +31,7 @@ public class Spectator {
         int loginPort = args.length > 1 ? Integer.parseInt(args[1]) : 8484;
         String user = args.length > 2 ? args[2] : "spectator";
         String pass = args.length > 3 ? args[3] : "spectator";
+        long budgetMs = args.length > 4 ? Long.parseLong(args[4]) * 1000 : RUN_BUDGET_MS;
 
         System.out.println("=== Spectator ===");
         System.out.printf("connecting to %s:%d as '%s'%n", host, loginPort, user);
@@ -40,7 +41,7 @@ public class Spectator {
             conn.setReadTimeoutMs(READ_TICK_MS);
             System.out.println("[..]   watching for other players entering/moving in this map");
 
-            long deadline = System.currentTimeMillis() + RUN_BUDGET_MS;
+            long deadline = System.currentTimeMillis() + budgetMs;
             while (System.currentTimeMillis() < deadline) {
                 try {
                     InPacket p = conn.receive();
@@ -52,10 +53,12 @@ public class Spectator {
                     if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
                         int charId = p.readInt();   // leading field of spawnPlayerMapObject; rest unparsed
                         if (charId != session.charId()) {
-                            System.out.println("[see]   player " + charId + " is in this map");
+                            System.out.println(java.time.LocalTime.now() + " [see]   player " + charId + " is in this map");
                         }
                     } else if (opcode == SendOpcode.MOVE_PLAYER.getValue()) {
                         logMove(p, session.charId());
+                    } else if (opcode == SendOpcode.REMOVE_PLAYER_FROM_MAP.getValue()) {
+                        System.out.println(java.time.LocalTime.now() + " [see]   player " + p.readInt() + " left this map");
                     }
                 } catch (SocketTimeoutException e) {
                     // just a quiet tick, keep waiting
@@ -83,12 +86,12 @@ public class Spectator {
         if (command != 0) {
             // Only the absolute-move fragment (command 0) is one ActionExecutor ever sends; other
             // commands (jump, knockback, ...) would need their own field layouts to decode.
-            System.out.println("[see]   player " + chrId + " sent a movement fragment (command " + command
+            System.out.println(java.time.LocalTime.now() + " [see]   player " + chrId + " sent a movement fragment (command " + command
                     + ") - not decoded, only command 0 (absolute move) is");
             return;
         }
         Point pos = p.readPos();
         String who = chrId == selfCharId ? "self (unexpected - moves aren't echoed to the mover)" : String.valueOf(chrId);
-        System.out.println("[see]   player " + who + " moved to " + pos.x + "," + pos.y);
+        System.out.println(java.time.LocalTime.now() + " [see]   player " + who + " moved to " + pos.x + "," + pos.y);
     }
 }

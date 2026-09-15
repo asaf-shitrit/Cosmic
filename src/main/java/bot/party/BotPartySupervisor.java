@@ -1,0 +1,487 @@
+package bot.party;
+
+import client.Character;
+import net.server.PlayerStorage;
+import net.server.Server;
+import net.server.coordinator.world.InviteCoordinator;
+import net.server.coordinator.world.InviteCoordinator.InviteType;
+import net.server.world.Party;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import server.maps.MapleMap;
+import tools.DatabaseConnection;
+import tools.PacketCreator;
+
+import java.awt.Point;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Starts, watches and stops the bots players summon through Shumi ({@code scripts/npc/1052102.js}).
+ *
+ * <p><b>Why inside the server JVM.</b> An NPC script runs in the server process, inside its container,
+ * and cannot launch anything on the host. The {@code bot} package is already compiled into the server
+ * jar, so each bot runs here as a thread that connects to the server's own login port over loopback.
+ * On the wire nothing distinguishes it from a remote player, so party, map and combat code need no
+ * special cases - the few things this class does on the server's side are exactly what a player's own
+ * action or an event script would do: sending the party invite the owner asked for, and warping.
+ *
+ * <p><b>Caps.</b> {@link #MAX_BOTS_PER_OWNER} per player and {@link #MAX_BOTS_TOTAL} server-wide,
+ * counted over live threads (a bot still shutting down still counts), plus a per-player summon
+ * cooldown. A bot is never restarted automatically, so a bot that crashes can't turn into a login loop.
+ *
+ * <p><b>No orphans.</b> A watchdog checks every owner once a second against the server's own player
+ * storage; the moment an owner is gone from the world, on another channel, or away (cash shop), all of
+ * that owner's bots are dismissed. A bot that leaves the owner's party is dismissed too.
+ *
+ * <p><b>Placement.</b> A bot logs in wherever its character last was (a new one on Maple Island), so
+ * the watchdog warps it to its owner once it is in the world, then invites it. After that the bot
+ * follows on its own ({@link FollowPlanner}); only if it has been on a different map from its owner for
+ * {@link #CATCH_UP_AFTER_MS} - the owner used something other than an adjacent portal - does the
+ * watchdog warp it again. Neither warp is done into an event instance: a bot isn't registered to it.
+ *
+ * <p><b>Locking.</b> The registry is guarded by {@code this}, and nothing that touches game state
+ * (parties, maps, the database) runs while holding it: NPC scripts call in on a client's thread, and
+ * holding this lock while taking a party or map lock would invite a lock-order deadlock.
+ */
+public final class BotPartySupervisor {
+    private static final Logger log = LoggerFactory.getLogger(BotPartySupervisor.class);
+
+    public static final int MAX_BOTS_PER_OWNER = 3;
+    public static final int MAX_BOTS_TOTAL = 9;
+    private static final int PARTY_CAPACITY = 6;
+    /** The login flow in {@code BotSession} only knows world 0. */
+    private static final int SUPPORTED_WORLD = 0;
+
+    private static final long SUMMON_COOLDOWN_MS = 10_000;
+    private static final long WATCHDOG_PERIOD_MS = 1000;
+    /** A bot not in the world by now is stuck in login; stop it. */
+    private static final long LOGIN_DEADLINE_MS = 60_000;
+    /** After asking a bot to stop, how long before its socket is closed out from under it. */
+    private static final long STOP_GRACE_MS = 5000;
+    private static final long INVITE_RETRY_MS = 5000;
+    private static final int MAX_INVITES = 3;
+    private static final long CATCH_UP_AFTER_MS = 8000;
+
+    private static BotPartySupervisor instance;
+
+    /** ownerId -> that owner's live bots. Guarded by {@code this}. */
+    private final Map<Integer, List<SummonedBot>> botsByOwner = new HashMap<>();
+    /** ownerId -> when that owner last summoned. Guarded by {@code this}. */
+    private final Map<Integer, Long> lastSummonAt = new HashMap<>();
+    /** bot name -> why it last stopped, for "My bots". Bounded by owners x slots. Guarded by {@code this}. */
+    private final Map<String, String> lastStopReason = new HashMap<>();
+    private final ScheduledExecutorService watchdog;
+    private boolean shutDown;
+
+    private BotPartySupervisor() {
+        watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "bot-party-watchdog");
+            t.setDaemon(true);
+            return t;
+        });
+        watchdog.scheduleWithFixedDelay(this::watchdogTick, WATCHDOG_PERIOD_MS, WATCHDOG_PERIOD_MS, TimeUnit.MILLISECONDS);
+    }
+
+    public static synchronized BotPartySupervisor getInstance() {
+        if (instance == null) {
+            instance = new BotPartySupervisor();
+        }
+        return instance;
+    }
+
+    /** Server shutdown: dismiss every bot, without creating the supervisor if nobody ever used it. */
+    public static void shutdownIfRunning() {
+        BotPartySupervisor s;
+        synchronized (BotPartySupervisor.class) {
+            s = instance;
+            instance = null;
+        }
+        if (s != null) {
+            s.shutdown();
+        }
+    }
+
+    // ---- NPC-facing API: every method returns ready-to-show dialogue text or a number ----
+
+    /** How many bots {@code owner} may summon right now; 0 means {@link #summonBlockedReason} explains why. */
+    public int summonCapacity(Character owner) {
+        return evaluate(owner).capacity;
+    }
+
+    public String summonBlockedReason(Character owner) {
+        return evaluate(owner).reason;
+    }
+
+    public String summon(Character owner, int requested) {
+        Evaluation eval = evaluate(owner);
+        if (eval.capacity <= 0) {
+            return eval.reason;
+        }
+        int count = Math.max(1, Math.min(requested, eval.capacity));
+        List<String> started = new ArrayList<>();
+        synchronized (this) {
+            if (shutDown) {
+                return "I can't call anyone right now.";
+            }
+            // evaluate() ran outside the lock, so re-check what another summon could have changed since:
+            // the cooldown (same owner, double-submitted) and both hard caps.
+            if (System.currentTimeMillis() - lastSummonAt.getOrDefault(owner.getId(), 0L) < SUMMON_COOLDOWN_MS) {
+                return "Give the last ones a moment to get here first.";
+            }
+            List<SummonedBot> mine = botsByOwner.computeIfAbsent(owner.getId(), k -> new ArrayList<>());
+            for (int slot = 0; slot < MAX_BOTS_PER_OWNER && started.size() < count; slot++) {
+                final int s = slot;
+                if (mine.stream().anyMatch(b -> b.slot == s)) {
+                    continue;
+                }
+                if (mine.size() >= MAX_BOTS_PER_OWNER || totalBotsLocked() >= MAX_BOTS_TOTAL) {
+                    break;
+                }
+                String name = BotAccounts.botName(owner.getId(), slot);
+                SummonedBot bot = new SummonedBot(this, owner.getId(), owner.getName(), owner.getWorld(),
+                        owner.getClient().getChannel(), slot, name);
+                mine.add(bot);
+                lastStopReason.remove(name);
+                Thread t = new Thread(bot, "summoned-bot-" + name);
+                t.setDaemon(true);
+                try {
+                    t.start();
+                } catch (OutOfMemoryError e) {   // "unable to create native thread" - don't leak a phantom entry
+                    mine.remove(bot);
+                    log.warn("Couldn't start a thread for summoned bot {}", name, e);
+                    break;
+                }
+                started.add(name);
+            }
+            if (started.isEmpty()) {
+                if (mine.isEmpty()) {
+                    botsByOwner.remove(owner.getId());
+                }
+                return "Everyone I know is already out with someone. Try again later.";
+            }
+            lastSummonAt.put(owner.getId(), System.currentTimeMillis());
+        }
+        log.info("Summoning {} bot(s) for {} on channel {}: {}", started.size(), owner.getName(),
+                owner.getClient().getChannel(), started);
+        return "Alright, I've sent word to #b" + String.join(", ", started) + "#k. They'll arrive and join your"
+                + " party in a few seconds, and they'll follow you wherever you go on this channel.";
+    }
+
+    public String dismiss(Character owner) {
+        List<SummonedBot> mine = snapshotOf(owner.getId());
+        if (mine.isEmpty()) {
+            return "You don't have anyone following you right now.";
+        }
+        for (SummonedBot bot : mine) {
+            bot.requestStop("dismissed");
+        }
+        log.info("Dismissing {} bot(s) for {}", mine.size(), owner.getName());
+        return "Okay, I'll send them home. Thanks for looking after them!";
+    }
+
+    /** "My bots": every bot slot this player has a character for, with where it is according to the server. */
+    public String describe(Character owner) {
+        Map<String, Integer> offlineMaps = loadBotCharacters(owner.getId());
+        List<SummonedBot> mine = snapshotOf(owner.getId());
+        PlayerStorage storage = owner.getWorldServer().getPlayerStorage();
+
+        StringBuilder sb = new StringBuilder();
+        for (int slot = 0; slot < MAX_BOTS_PER_OWNER; slot++) {
+            String name = BotAccounts.botName(owner.getId(), slot);
+            if (name == null) {
+                continue;
+            }
+            final int s = slot;
+            SummonedBot active = mine.stream().filter(b -> b.slot == s).findFirst().orElse(null);
+            Character online = storage.getCharacterByName(name);
+            String line;
+            if (online != null && online.isLoggedinWorld()) {
+                line = "online, ch " + online.getClient().getChannel() + ", #m" + online.getMapId() + "#";
+                if (active != null && active.state() == SummonedBot.State.STOPPING) {
+                    line += " (leaving)";
+                }
+            } else if (active != null) {
+                line = active.state() == SummonedBot.State.STOPPING ? "leaving" : "on the way";
+            } else if (offlineMaps.containsKey(name)) {
+                String reason;
+                synchronized (this) {
+                    reason = lastStopReason.get(name);
+                }
+                line = "offline, last in #m" + offlineMaps.get(name) + "#" + (reason == null ? "" : " (" + reason + ")");
+            } else {
+                continue;
+            }
+            sb.append("\r\n#b").append(name).append("#k - ").append(line);
+        }
+        return sb.length() == 0
+                ? "You haven't summoned anyone yet."
+                : "Here's who you've got:" + sb;
+    }
+
+    // ---- lifecycle ----
+
+    void onBotExit(SummonedBot bot) {
+        synchronized (this) {
+            List<SummonedBot> mine = botsByOwner.get(bot.ownerId);
+            if (mine != null) {
+                mine.remove(bot);
+                if (mine.isEmpty()) {
+                    botsByOwner.remove(bot.ownerId);
+                }
+            }
+            lastStopReason.put(bot.name, bot.stopReason != null ? bot.stopReason : "disconnected");
+        }
+        log.info("Summoned bot {} (owner {}) logged out: {}", bot.name, bot.ownerName,
+                bot.stopReason != null ? bot.stopReason : "connection ended");
+    }
+
+    private void shutdown() {
+        List<SummonedBot> all;
+        synchronized (this) {
+            shutDown = true;
+            all = new ArrayList<>();
+            botsByOwner.values().forEach(all::addAll);
+        }
+        watchdog.shutdownNow();
+        all.forEach(b -> b.requestStop("server shutting down"));
+        long deadline = System.currentTimeMillis() + STOP_GRACE_MS;
+        while (System.currentTimeMillis() < deadline && totalBots() > 0) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        all.forEach(SummonedBot::forceClose);
+        log.info("Bot party supervisor stopped ({} bot(s) dismissed)", all.size());
+    }
+
+    private void watchdogTick() {
+        try {
+            List<SummonedBot> all;
+            synchronized (this) {
+                all = new ArrayList<>();
+                botsByOwner.values().forEach(all::addAll);
+            }
+            long now = System.currentTimeMillis();
+            for (SummonedBot bot : all) {
+                try {
+                    check(bot, now);
+                } catch (Exception e) {
+                    log.warn("Watchdog check failed for summoned bot {}", bot.name, e);
+                }
+            }
+        } catch (Throwable t) {
+            // A throw would silently cancel the scheduled task, and with it every orphan check.
+            log.error("Bot party watchdog tick failed", t);
+        }
+    }
+
+    private void check(SummonedBot bot, long now) {
+        if (bot.stopRequested) {
+            if (now - bot.stopRequestedAt > STOP_GRACE_MS) {
+                bot.forceClose();
+            }
+            return;
+        }
+
+        PlayerStorage storage = Server.getInstance().getWorld(bot.worldId).getPlayerStorage();
+        Character owner = storage.getCharacterById(bot.ownerId);
+        if (owner == null || !owner.isLoggedinWorld()) {
+            bot.requestStop("owner logged out");
+            return;
+        }
+        if (owner.getClient().getChannel() != bot.channel) {
+            bot.requestStop("owner changed channel");
+            return;
+        }
+
+        if (bot.charId < 0) {
+            if (now - bot.startedAt > LOGIN_DEADLINE_MS) {
+                bot.requestStop("couldn't log in");
+            }
+            return;
+        }
+        Character self = storage.getCharacterById(bot.charId);
+        if (self == null || !self.isLoggedinWorld() || self.isChangingMaps()) {
+            return;             // still entering the world, or between maps
+        }
+
+        if (!bot.placed) {
+            if (owner.getEventInstance() == null && warpToOwner(self, owner)) {
+                bot.placed = true;
+            }
+            return;
+        }
+
+        Party ownerParty = owner.getParty();
+        Party selfParty = self.getParty();
+        if (selfParty != null) {
+            if (ownerParty == null || selfParty.getId() != ownerParty.getId()) {
+                bot.requestStop("left your party");
+                return;
+            }
+            if (!bot.joinedParty) {
+                bot.joinedParty = true;
+                log.info("Summoned bot {} joined {}'s party {}", bot.name, owner.getName(), selfParty.getId());
+            }
+        } else if (bot.joinedParty) {
+            bot.requestStop("left your party");
+            return;
+        } else if (now - bot.lastInviteAt >= INVITE_RETRY_MS) {
+            if (bot.invitesSent >= MAX_INVITES) {
+                bot.requestStop("couldn't join your party");
+                return;
+            }
+            bot.invitesSent++;
+            bot.lastInviteAt = now;
+            invite(owner, self, bot);
+            return;
+        }
+
+        if (self.getMapId() == owner.getMapId()) {
+            bot.awayFromOwnerSince = 0;
+        } else if (bot.awayFromOwnerSince == 0) {
+            bot.awayFromOwnerSince = now;
+        } else if (now - bot.awayFromOwnerSince > CATCH_UP_AFTER_MS && owner.getEventInstance() == null) {
+            if (warpToOwner(self, owner)) {
+                log.info("Summoned bot {} fell behind {}, warped to map {}", bot.name, owner.getName(), owner.getMapId());
+            }
+            bot.awayFromOwnerSince = 0;
+        }
+    }
+
+    /**
+     * The same steps {@code PartyOperationHandler} takes when a player invites someone by name - create
+     * the party if the owner has none, check it has room, register the invite with
+     * {@code InviteCoordinator} and send it - done on the owner's behalf, since summoning is the
+     * owner asking for these bots in their party. The bot answers it over the wire like any invitee,
+     * so the join itself goes through {@code PartyOperationHandler} unchanged.
+     */
+    private void invite(Character owner, Character self, SummonedBot bot) {
+        Party party = owner.getParty();
+        if (party == null) {
+            if (!Party.createParty(owner, true)) {
+                bot.requestStop("you couldn't start a party");
+                return;
+            }
+            party = owner.getParty();
+        }
+        if (party.getMembers().size() >= PARTY_CAPACITY) {
+            bot.requestStop("your party is full");
+            return;
+        }
+        if (InviteCoordinator.createInvite(InviteType.PARTY, owner, party.getId(), self.getId())) {
+            self.sendPacket(PacketCreator.partyInvite(owner));
+        }
+    }
+
+    /**
+     * A server-initiated warp, as an event script does - {@code SET_FIELD} reaches the bot like any warp
+     * and it sends {@code PLAYER_MAP_TRANSFER} itself. Placed on the owner's spot; it walks out to its
+     * follow slot from there.
+     */
+    private static boolean warpToOwner(Character self, Character owner) {
+        MapleMap map = owner.getMap();
+        if (map == null) {
+            return false;
+        }
+        self.changeMap(map, new Point(owner.getPosition()));
+        return true;
+    }
+
+    // ---- helpers ----
+
+    private record Evaluation(int capacity, String reason) {}
+
+    private Evaluation evaluate(Character owner) {
+        if (owner.getWorld() != SUPPORTED_WORLD) {
+            return new Evaluation(0, "I only know people in the first world, sorry.");
+        }
+        if (BotAccounts.botName(owner.getId(), MAX_BOTS_PER_OWNER - 1) == null) {
+            return new Evaluation(0, "Sorry, I can't find anyone for you.");
+        }
+        if (owner.getEventInstance() != null) {
+            return new Evaluation(0, "Not while you're in the middle of something like this!");
+        }
+        Party party = owner.getParty();
+        if (party == null && owner.getLevel() < 10) {
+            return new Evaluation(0, "They'd join you in a party, and you need to be at least #blevel 10#k to"
+                    + " start one.");
+        }
+
+        int partyMembers = party == null ? 1 : party.getMembers().size();
+        synchronized (this) {
+            if (shutDown) {
+                return new Evaluation(0, "I can't call anyone right now.");
+            }
+            List<SummonedBot> mine = botsByOwner.getOrDefault(owner.getId(), List.of());
+            long sinceLast = System.currentTimeMillis() - lastSummonAt.getOrDefault(owner.getId(), 0L);
+            if (sinceLast < SUMMON_COOLDOWN_MS) {
+                return new Evaluation(0, "Give the last ones a moment to get here first.");
+            }
+            // Bots still on their way aren't in the party yet but will take a seat.
+            long pendingSeats = mine.stream().filter(b -> !b.stopRequested && !b.joinedParty).count();
+            int ownerFree = MAX_BOTS_PER_OWNER - mine.size();
+            int serverFree = MAX_BOTS_TOTAL - totalBotsLocked();
+            int partyFree = PARTY_CAPACITY - partyMembers - (int) pendingSeats;
+
+            if (ownerFree <= 0) {
+                return new Evaluation(0, "You've already got " + MAX_BOTS_PER_OWNER + " following you. That's"
+                        + " as many as I can spare for one person.");
+            }
+            if (serverFree <= 0) {
+                return new Evaluation(0, "Everyone I know is already out with someone. Try again later.");
+            }
+            if (partyFree <= 0) {
+                return new Evaluation(0, "Your party doesn't have room for anyone else.");
+            }
+            return new Evaluation(Math.min(ownerFree, Math.min(serverFree, partyFree)), "");
+        }
+    }
+
+    private synchronized List<SummonedBot> snapshotOf(int ownerId) {
+        return new ArrayList<>(botsByOwner.getOrDefault(ownerId, List.of()));
+    }
+
+    private synchronized int totalBots() {
+        return totalBotsLocked();
+    }
+
+    private int totalBotsLocked() {
+        return botsByOwner.values().stream().mapToInt(List::size).sum();
+    }
+
+    /** name -> last saved map, for this owner's bot characters that exist in the database. */
+    private static Map<String, Integer> loadBotCharacters(int ownerId) {
+        Map<String, Integer> result = new LinkedHashMap<>();
+        try (Connection con = DatabaseConnection.getConnection();
+             PreparedStatement ps = con.prepareStatement("SELECT name, map FROM characters WHERE name IN ("
+                     + String.join(", ", java.util.Collections.nCopies(MAX_BOTS_PER_OWNER, "?")) + ")")) {
+            for (int slot = 0; slot < MAX_BOTS_PER_OWNER; slot++) {
+                String name = BotAccounts.botName(ownerId, slot);
+                ps.setString(slot + 1, name == null ? "" : name);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    result.put(rs.getString(1), rs.getInt(2));
+                }
+            }
+        } catch (SQLException e) {
+            log.warn("Couldn't list bot characters for owner {}", ownerId, e);
+        }
+        return result;
+    }
+}

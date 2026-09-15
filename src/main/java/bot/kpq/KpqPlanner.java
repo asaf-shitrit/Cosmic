@@ -155,8 +155,8 @@ public class KpqPlanner implements Planner {
             lastMapChangeCount = mapChanges;
             // mapChanges: 1 = just landed in the recruit map (login's own SET_FIELD), 2 = stage 1,
             // 3 = stage 2, ... 6 = stage 5. Every KPQ warp is a forward step, so this simple mapping
-            // holds for the whole run - see WorldState#onMapChanged on why the actual map id isn't
-            // decoded off the wire instead.
+            // holds for the whole run. (WorldState#getSelfMapId now decodes the map id too; this
+            // counting predates it and is proven live, so it was left as is.)
             int newStageIndex = mapChanges - 2;
             if (newStageIndex != stageIndex) {
                 stageIndex = newStageIndex;

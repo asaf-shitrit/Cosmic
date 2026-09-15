@@ -4,6 +4,7 @@ import net.opcodes.SendOpcode;
 import net.packet.InPacket;
 
 import java.awt.Point;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
@@ -47,14 +48,34 @@ public class WorldState {
     private final Map<Integer, NpcSighting> npcs = new ConcurrentHashMap<>();
     private final Map<Integer, MonsterSighting> monsters = new ConcurrentHashMap<>();
     private final Map<Integer, Boolean> otherPlayers = new ConcurrentHashMap<>();
+    /**
+     * charId -> the last position the server holds for that player, from {@code SPAWN_PLAYER} and
+     * then every {@code MOVE_PLAYER}. A player can be present in {@link #otherPlayers} without an
+     * entry here if its spawn packet didn't decode (see {@link #readSpawnPlayerPosition}).
+     */
+    private final Map<Integer, Point> playerPositions = new ConcurrentHashMap<>();
     private final Map<Integer, ItemDrop> itemDrops = new ConcurrentHashMap<>();
 
     /** ETC inventory slot -> (itemId, quantity), kept in sync from {@code INVENTORY_OPERATION}. */
     private final Map<Integer, EtcSlotEntry> etcSlots = new ConcurrentHashMap<>();
 
+    /**
+     * One occupied slot of the party roster as the server last described it.
+     *
+     * @param channel zero-indexed channel, or -2 when the member is offline ({@code addPartyStatus})
+     * @param mapId   the member's map, or 0 when the member is on a different channel from this bot -
+     *                the server only reveals maps for same-channel members
+     */
+    public record PartyMember(int id, String name, int channel, int mapId) {}
+
     private volatile int partyId = -1;
     private volatile int partyLeaderId = -1;
-    private final Set<Integer> partyMemberIds = ConcurrentHashMap.newKeySet();
+    private final Map<Integer, PartyMember> partyMembers = new ConcurrentHashMap<>();
+
+    /** Map this bot is on, from the last {@code SET_FIELD}; -1 until one has been decoded. */
+    private volatile int selfMapId = -1;
+    /** Portal id the server placed this bot at on arrival (the portal's WZ node index). */
+    private volatile int selfSpawnPortalId = -1;
     private volatile PartyInvite pendingPartyInvite;
     private volatile NpcTalk lastNpcTalk;
 
@@ -115,15 +136,34 @@ public class WorldState {
             return "monster " + removed.monsterId() + " (oid=" + removed.objectId() + ") removed";
         }
         if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
-            int charId = p.readInt();      // leading field of spawnPlayerMapObject - rest is unparsed
-            if (charId == selfCharId || otherPlayers.put(charId, Boolean.TRUE) != null) {
+            int charId = p.readInt();
+            if (charId == selfCharId) {
+                return null;
+            }
+            Point pos = readSpawnPlayerPosition(p);
+            if (pos != null) {
+                playerPositions.put(charId, pos);
+            }
+            if (otherPlayers.put(charId, Boolean.TRUE) != null) {
                 return null;
             }
             changeVersion.incrementAndGet();
-            return "player " + charId + " entered the map";
+            return "player " + charId + " entered the map at " + (pos == null ? "(undecoded)" : pointToString(pos));
+        }
+        if (opcode == SendOpcode.MOVE_PLAYER.getValue()) {
+            int charId = p.readInt();
+            p.readInt();                   // PacketCreator.movePlayer's spare int, always 0
+            Point pos = readLastAbsolutePosition(p);
+            if (pos == null || charId == selfCharId) {
+                return null;
+            }
+            playerPositions.put(charId, pos);
+            changeVersion.incrementAndGet();
+            return null;                   // far too frequent to narrate
         }
         if (opcode == SendOpcode.REMOVE_PLAYER_FROM_MAP.getValue()) {
             int charId = p.readInt();
+            playerPositions.remove(charId);
             if (otherPlayers.remove(charId) == null) {
                 return null;
             }
@@ -191,22 +231,24 @@ public class WorldState {
             case 0x08: {   // partyCreated: int partyId, then 4 ints of door info (irrelevant, no door)
                 partyId = p.readInt();
                 partyLeaderId = selfCharId;
-                partyMemberIds.add(selfCharId);
+                partyMembers.put(selfCharId, new PartyMember(selfCharId, "", -1, selfMapId));
                 changeVersion.incrementAndGet();
                 return "party " + partyId + " created, this bot is leader";
             }
             case 0x0F: {   // updateParty(JOIN): int partyId, string joinedName, then addPartyStatus
                 partyId = p.readInt();
-                p.readString();       // joined member's name - membership itself comes from the ids below
-                readPartyStatusMemberIdsAndLeader(p);
+                String joinedName = p.readString();
+                readPartyStatus(p);
                 changeVersion.incrementAndGet();
-                return "party " + partyId + " now has " + partyMemberIds.size() + " member(s)";
+                return "party " + partyId + ": " + joinedName + " joined, roster " + describeRoster();
             }
             case 0x07: {   // updateParty(SILENT_UPDATE/LOG_ONOFF): int partyId, then addPartyStatus
+                int before = rosterFingerprint();
                 partyId = p.readInt();
-                readPartyStatusMemberIdsAndLeader(p);
+                readPartyStatus(p);
                 changeVersion.incrementAndGet();
-                return "party " + partyId + " roster refreshed, " + partyMemberIds.size() + " member(s)";
+                // Sent on every member's map change and HP-adjacent refresh - only narrate real changes.
+                return before == rosterFingerprint() ? null : "party " + partyId + " roster " + describeRoster();
             }
             case 0x0C: {   // updateParty(LEAVE/EXPEL/DISBAND): int partyId, int targetId, byte...
                 int opPartyId = p.readInt();
@@ -218,7 +260,7 @@ public class WorldState {
                 }
                 p.readByte();                              // 1 = expel, 0 = leave
                 p.readString();                             // target's name
-                readPartyStatusMemberIdsAndLeader(p);
+                readPartyStatus(p);
                 if (targetId == selfCharId) {
                     resetPartyState();
                     return "removed from party " + opPartyId;
@@ -238,34 +280,212 @@ public class WorldState {
 
     /**
      * Common tail of {@code PacketCreator#addPartyStatus}: 6 member-id ints (0 for an empty slot),
-     * 6 fixed 13-byte names, 6 job ints, 6 level ints, 6 channel ints, one leader-id int, 6 map-id
-     * ints, then 6 door blocks of 4 ints each. Only the id array and the leader id are useful here.
+     * 6 fixed 13-byte NUL-padded names, 6 job ints, 6 level ints, 6 channel ints (zero-indexed, -2 =
+     * offline), one leader-id int, 6 map-id ints (0 for a member on another channel than the
+     * receiver), then 6 door blocks of 4 ints each.
+     *
+     * <p>The map ids are what let a follower learn where its leader went: {@code Character#changeMapInternal}
+     * ends in {@code silentPartyUpdateInternal}, so every member's map change is broadcast to the
+     * whole party as a {@code SILENT_UPDATE} carrying this block.
      */
-    private void readPartyStatusMemberIdsAndLeader(InPacket p) {
+    private void readPartyStatus(InPacket p) {
         int[] ids = new int[6];
         for (int i = 0; i < 6; i++) {
             ids[i] = p.readInt();
         }
-        p.skip(6 * 13);              // fixed-width names - not needed, characters are identified by id
-        p.skip(6 * 4 * 3);           // job, level, channel per slot
+        String[] names = new String[6];
+        for (int i = 0; i < 6; i++) {
+            String raw = new String(p.readBytes(13), StandardCharsets.US_ASCII);
+            int nul = raw.indexOf('\0');
+            names[i] = nul < 0 ? raw : raw.substring(0, nul);
+        }
+        p.skip(6 * 4 * 2);           // job, level per slot
+        int[] channels = new int[6];
+        for (int i = 0; i < 6; i++) {
+            channels[i] = p.readInt();
+        }
         int leader = p.readInt();
-        p.skip(6 * 4);               // map id per slot
-        p.skip(6 * 4 * 4);           // door blocks
+        int[] maps = new int[6];
+        for (int i = 0; i < 6; i++) {
+            maps[i] = p.readInt();
+        }
+        // door blocks (6 * 4 ints) left unread - see class javadoc on under-reading
 
         partyLeaderId = leader;
-        partyMemberIds.clear();
-        for (int id : ids) {
-            if (id != 0) {
-                partyMemberIds.add(id);
+        partyMembers.clear();
+        for (int i = 0; i < 6; i++) {
+            if (ids[i] != 0) {
+                partyMembers.put(ids[i], new PartyMember(ids[i], names[i], channels[i], maps[i]));
             }
         }
+    }
+
+    private String describeRoster() {
+        StringBuilder sb = new StringBuilder("[");
+        for (PartyMember m : partyMembers.values()) {
+            if (sb.length() > 1) {
+                sb.append(", ");
+            }
+            sb.append(m.name()).append('#').append(m.id())
+                    .append(m.channel() < 0 ? " offline" : " ch" + (m.channel() + 1) + " map " + m.mapId());
+        }
+        return sb.append("] leader ").append(partyLeaderId).toString();
+    }
+
+    /** Changes whenever membership or online state changes, but not on a mere map change. */
+    private int rosterFingerprint() {
+        int h = partyLeaderId;
+        for (PartyMember m : partyMembers.values()) {
+            h += 31 * m.id() + (m.channel() < 0 ? 7 : 0);
+        }
+        return h;
     }
 
     private void resetPartyState() {
         partyId = -1;
         partyLeaderId = -1;
-        partyMemberIds.clear();
+        partyMembers.clear();
         changeVersion.incrementAndGet();
+    }
+
+    /**
+     * Skips {@code PacketCreator.spawnPlayerMapObject} up to the position field and reads it, or
+     * returns {@code null} if the packet doesn't have that shape (the cosmetic fake players share the
+     * opcode but are written by a different method). Layout, after the leading charId:
+     * byte level, string name, string guildName, 6 bytes guild logo (zeroed when guildless), then
+     * {@code writeForeignBuffs}: int, short, byte, byte, int morphFlag (2 when morphed), int
+     * buffMaskHigh, an optional buff value (short if morphed, else byte if Combo is in the high mask),
+     * int buffMaskLow, then a fixed 108 bytes of energy/dash/mount/zombify blocks. Then short job,
+     * {@code addCharLook} (byte gender, byte skin, int face, byte, int hair, two 0xFF-terminated
+     * lists of (byte slot, int itemId), int cash weapon, 3 pet ints), 3 ints (chocolate count, item
+     * effect, chair), and finally the position. When the player is entering the field right now the
+     * server writes its position 42px higher (it drops onto the foothold client-side) - close enough
+     * for following, not corrected here.
+     */
+    private static Point readSpawnPlayerPosition(InPacket p) {
+        try {
+            p.readByte();
+            p.readString();
+            p.readString();
+            p.skip(6);
+            p.skip(4 + 2 + 1 + 1);
+            int morphFlag = p.readInt();
+            int maskHigh = p.readInt();
+            if (morphFlag == 2) {
+                p.skip(2);
+            } else if ((maskHigh & COMBO_MASK_HIGH) != 0) {
+                p.skip(1);
+            }
+            p.skip(4);
+            p.skip(108);
+            p.skip(2);
+            p.skip(1 + 1 + 4 + 1 + 4);
+            skipEquipList(p);
+            skipEquipList(p);
+            p.skip(4 + 3 * 4);
+            p.skip(3 * 4);
+            return p.readPos();
+        } catch (RuntimeException e) {
+            return null;             // under-read past the end of a differently-shaped packet
+        }
+    }
+
+    /** {@code BuffStat.COMBO} is bit 53, i.e. this bit of the high 32-bit half of the mask. */
+    private static final int COMBO_MASK_HIGH = (int) (0x20000000000000L >>> 32);
+
+    private static void skipEquipList(InPacket p) {
+        while ((p.readByte() & 0xFF) != 0xFF) {
+            p.skip(4);
+        }
+    }
+
+    /**
+     * Walks a rebroadcast movement list the same way {@code AbstractMovementPacketHandler#updatePosition}
+     * does and returns the position the server itself kept: only the absolute fragments (commands 0,
+     * 5 and 17) carry a position the server stores; every other command only changes stance. Returns
+     * {@code null} if no fragment set a position, or on a command the server itself doesn't know
+     * (it would have rejected that packet rather than broadcast it).
+     */
+    private static Point readLastAbsolutePosition(InPacket p) {
+        Point last = null;
+        int count = p.readByte();
+        for (int i = 0; i < count; i++) {
+            int command = p.readByte();
+            switch (command) {
+                case 0, 5, 17 -> {
+                    last = p.readPos();
+                    p.skip(6 + 1 + 2);   // wobble x/y, foothold, stance, duration
+                }
+                case 1, 2, 6, 12, 13, 16, 18, 19, 20, 22 -> p.skip(4 + 1 + 2);
+                case 3, 4, 7, 8, 9, 11 -> p.skip(8 + 1);
+                case 14 -> p.skip(9);
+                case 10 -> p.skip(1);
+                case 15 -> p.skip(12 + 1 + 2);
+                case 21 -> p.skip(3);
+                default -> {
+                    return last;
+                }
+            }
+        }
+        return last;
+    }
+
+    /**
+     * Records the map {@code SET_FIELD} put this bot on, then clears map-scoped state (see
+     * {@link #onMapChanged()}). {@code p} is positioned just after the opcode. Two shapes share the
+     * opcode, told apart by the byte after the leading channel int:
+     * <ul>
+     *   <li>{@code getWarpToMap} (every map change): int channel, int 0, byte 0, int mapId, byte
+     *       spawnPortalId, short hp, bool hasExplicitPosition, [int x, int y], long time. The first
+     *       byte after the channel is therefore 0.</li>
+     *   <li>{@code getCharInfo} (world entry): int channel, byte 1, byte 1, short 0, 3 random ints,
+     *       long -1, byte 0, then {@code addCharStats} whose map id sits at a fixed offset <em>for a
+     *       job without an SP table</em> - true of every Adventurer; an Evan's variable SP block would
+     *       shift it, so the id decoded for one would be wrong.</li>
+     * </ul>
+     */
+    public void onSetField(InPacket p) {
+        try {
+            p.readInt();                                 // channel
+            if (p.readByte() == 1) {
+                p.skip(1 + 2 + 3 * 4 + 8 + 1);
+                // addCharStats: id, name(13), gender, skin, face, hair, 3 pet longs, level, job,
+                // str/dex/int/luk/hp/maxhp/mp/maxmp, ap, sp, exp, fame, gachaExp - then the map id
+                p.skip(4 + 13 + 1 + 1 + 4 + 4 + 3 * 8 + 1 + 2 + 8 * 2 + 2 + 2 + 4 + 2 + 4);
+                selfMapId = p.readInt();
+                selfSpawnPortalId = p.readByte() & 0xFF;
+                selfPosition = null;
+            } else {
+                p.skip(3 + 1);
+                selfMapId = p.readInt();
+                selfSpawnPortalId = p.readByte() & 0xFF;
+                p.readShort();                           // hp
+                selfPosition = p.readByte() != 0 ? new Point(p.readInt(), p.readInt()) : null;
+            }
+        } catch (RuntimeException e) {
+            selfMapId = -1;
+            selfSpawnPortalId = -1;
+            selfPosition = null;
+        }
+        onMapChanged();
+    }
+
+    public int getSelfMapId() {
+        return selfMapId;
+    }
+
+    /** The WZ portal index this bot arrived at on its current map, or -1 if unknown. */
+    public int getSelfSpawnPortalId() {
+        return selfSpawnPortalId;
+    }
+
+    /** A player's last known position on this bot's map, or {@code null} if absent or never decoded. */
+    public Point getPlayerPosition(int charId) {
+        return playerPositions.get(charId);
+    }
+
+    public PartyMember getPartyMember(int charId) {
+        return partyMembers.get(charId);
     }
 
     /**
@@ -355,27 +575,28 @@ public class WorldState {
     }
 
     /**
-     * Clears everything scoped to the map this bot was just standing on. {@code SET_FIELD} carries a
-     * new map id on every warp (initial login included) but in two structurally different shapes
-     * ({@code getCharInfo}'s full snapshot vs {@code getWarpToMap}'s short form) that aren't worth
-     * disambiguating just to read a field this bot doesn't otherwise need - the driver loop
-     * (see {@code BotSession}) calls this on every {@code SET_FIELD} instead, since stale NPC/monster/
-     * drop object ids from the previous map are actively dangerous (a stale oid could collide with a
-     * live one on the new map) while simply forgetting them a moment early never is.
+     * Clears everything scoped to the map this bot was just standing on. Called for every
+     * {@code SET_FIELD} via {@link #onSetField}, since stale NPC/monster/drop object ids from the
+     * previous map are actively dangerous (a stale oid could collide with a live one on the new map)
+     * while simply forgetting them a moment early never is.
      */
     public void onMapChanged() {
         npcs.clear();
         monsters.clear();
         itemDrops.clear();
+        // The server never sends REMOVE_PLAYER_FROM_MAP to the player who is leaving, only to those
+        // staying, so everyone seen on the old map would otherwise linger here forever.
+        otherPlayers.clear();
+        playerPositions.clear();
         mapChangeCount.incrementAndGet();
         changeVersion.incrementAndGet();
     }
 
     /**
      * How many times {@link #onMapChanged()} has fired, counting the very first one (this bot's
-     * initial world entry). A planner that needs to know "did I just warp somewhere new" - without
-     * decoding {@code SET_FIELD}'s map id itself, see {@link #onMapChanged()} - polls this once per
-     * tick and reacts to it changing.
+     * initial world entry). A planner that needs to know "did I just warp somewhere new" - including a
+     * warp back to the same map id, which {@link #getSelfMapId()} can't show - polls this once per tick
+     * and reacts to it changing.
      */
     public int getMapChangeCount() {
         return mapChangeCount.get();
@@ -390,7 +611,7 @@ public class WorldState {
     }
 
     public Set<Integer> getPartyMemberIds() {
-        return Set.copyOf(partyMemberIds);
+        return Set.copyOf(partyMembers.keySet());
     }
 
     public PartyInvite getPendingPartyInvite() {
