@@ -5,27 +5,45 @@ import net.packet.OutPacket;
 
 import java.awt.Point;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 /**
  * Turns an {@link Action} into the matching RecvOpcode packet and sends it over a channel
  * {@link MapleConnection}. This is the only class that knows the wire format for actions -
  * {@link Planner} implementations only ever see {@link Action} values, never packets.
+ *
+ * <p>Chat is the exception to "execute means sent now": {@link Action.Say}, {@link Action.Reply} and
+ * {@link Action.Emote} are handed to {@link Speech}, which decides when a human would have finished
+ * typing them, and the driver loop calls {@link #tick()} to drain whatever is due. See {@link Speech}
+ * for why the cadence cannot live on a thread of its own.
  */
 public class ActionExecutor {
     private final MapleConnection conn;
     private final WorldState world;
+    private final Speech speech;
 
     public ActionExecutor(MapleConnection conn, WorldState world) {
+        this(conn, world, new Speech());
+    }
+
+    /**
+     * @param speech the pacing layer, injected so a test can drive it with a hand-moved clock and a
+     *               fixed random source instead of waiting out real seconds
+     */
+    public ActionExecutor(MapleConnection conn, WorldState world, Speech speech) {
         this.conn = conn;
         this.world = world;
+        this.speech = speech;
     }
 
     public void execute(Action action) throws IOException {
         switch (action) {
             case Action.MoveTo moveTo -> moveTo(moveTo.target());
             case Action.TalkToNpc talk -> talkToNpc(talk.npcObjectId());
-            case Action.Say say -> say(say.message());
+            case Action.Say say -> speech.say(say.message());
+            case Action.Reply reply -> speech.replyTo(reply.incoming(), reply.message());
+            case Action.Emote emote -> speech.emote(emote.emotion());
             case Action.CreateParty ignored -> createParty();
             case Action.LeaveParty ignored -> leaveParty();
             case Action.InviteToParty invite -> inviteToParty(invite.characterName());
@@ -82,12 +100,31 @@ public class ActionExecutor {
     }
 
     /**
+     * Sends at most one queued utterance whose typing time and rate limit have both elapsed. A driver
+     * loop calls this once per iteration; nothing else drains {@link Speech}, so a bot whose loop never
+     * ticks simply never speaks. Sending one packet per call is what keeps a fast-spinning loop from
+     * turning a backlog of chatter into a burst.
+     */
+    public void tick() throws IOException {
+        Speech.Utterance utterance = speech.poll();
+        if (utterance == null) {
+            return;
+        }
+        switch (utterance) {
+            case Speech.Utterance.Chat chat -> sendChat(chat.text());
+            case Speech.Utterance.Emote emote -> sendEmote(emote.emotion());
+        }
+    }
+
+    /**
      * GeneralChatHandler reads the string, then treats a leading {@code '/'} as a (server) command
      * attempt and silently drops anything that isn't a recognised one - so a real chat line must not
      * start with '/'. It also indexes {@code charAt(0)} unguarded, so an empty message would crash
-     * the handler; guarded against here rather than trusting every caller to remember.
+     * the handler; guarded against here rather than trusting every caller to remember. The length
+     * check is the same one the handler disconnects over - {@link Speech} has already truncated to it,
+     * so reaching this branch is a bug in the speech layer, not a message that is merely too long.
      */
-    private void say(String message) throws IOException {
+    private void sendChat(String message) throws IOException {
         if (message.isEmpty()) {
             throw new IllegalArgumentException("chat message must not be empty");
         }
@@ -95,9 +132,29 @@ public class ActionExecutor {
             throw new IllegalArgumentException("chat message must not start with '/' - "
                     + "GeneralChatHandler treats that as a command and drops anything unrecognised");
         }
+        if (message.getBytes(StandardCharsets.UTF_8).length > Byte.MAX_VALUE) {
+            throw new IllegalStateException("chat message exceeds the server's " + Byte.MAX_VALUE
+                    + "-byte limit by " + (message.getBytes(StandardCharsets.UTF_8).length - Byte.MAX_VALUE)
+                    + " bytes - it should have been truncated by Speech");
+        }
         OutPacket p = MapleConnection.packet(RecvOpcode.GENERAL_CHAT.getValue());
         p.writeString(message);
         p.writeByte(0);                  // "show" flag - bubble style, GeneralChatHandler just forwards it
+        conn.send(p);
+    }
+
+    /**
+     * {@code FaceExpressionHandler} reads one int and returns silently for anything below 1 or, above
+     * 7, for anything the character doesn't own a cash face item for. Only the built-in range is ever
+     * sent - see {@link Speech#emote}.
+     */
+    private void sendEmote(int emotion) throws IOException {
+        if (emotion < Speech.MIN_EMOTE || emotion > Speech.MAX_BUILT_IN_EMOTE) {
+            throw new IllegalArgumentException("emote " + emotion + " is not a built-in expression ("
+                    + Speech.MIN_EMOTE + ".." + Speech.MAX_BUILT_IN_EMOTE + ")");
+        }
+        OutPacket p = MapleConnection.packet(RecvOpcode.FACE_EXPRESSION.getValue());
+        p.writeInt(emotion);
         conn.send(p);
     }
 

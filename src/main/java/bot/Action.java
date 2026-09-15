@@ -30,6 +30,24 @@ public sealed interface Action {
     record Say(String message) implements Action {}
 
     /**
+     * Sends one line of general chat as an answer to what {@code incoming} just said. Identical on the
+     * wire to {@link Say}; the difference is purely pacing - {@link Speech} gives a reply a
+     * read-then-think pause proportional to how much there was to read, so it never lands on the tick
+     * the question arrived. {@code incoming} is used for nothing else and is never echoed.
+     */
+    record Reply(String incoming, String message) implements Action {}
+
+    /**
+     * Sends a face expression - the client's emotion packet, {@code RecvOpcode.FACE_EXPRESSION} (0x33),
+     * whose {@code FaceExpressionHandler} reads a single int. Ids 1..7 are the built-in expressions and
+     * need no item; anything above that is rejected by the handler unless the character owns cash face
+     * item {@code 5159992 + emotion}. Paced by {@link Speech} against {@code Character#changeFaceExpression}'s
+     * own 1500ms gate, which silently drops anything faster (and broadcasts nothing back, so a rejected
+     * emote is invisible to the bot).
+     */
+    record Emote(int emotion) implements Action {}
+
+    /**
      * Creates a brand-new party with this bot as leader. {@code PartyOperationHandler} operation 1;
      * no payload beyond the sub-opcode byte.
      */

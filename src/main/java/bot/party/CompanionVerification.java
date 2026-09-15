@@ -161,6 +161,9 @@ public final class CompanionVerification {
             } catch (SocketTimeoutException ignored) {
             }
 
+            // The owner's own chat is paced like any bot's - KpqPlanner has it announce a stage.
+            executor.tick();
+
             long now = System.currentTimeMillis();
             if (kpq && active == summon && world.getPartyMemberIds().size() >= 4 && summon.idle()) {
                 List<WorldState.PartyMember> companions = world.getPartyMemberIds().stream()
