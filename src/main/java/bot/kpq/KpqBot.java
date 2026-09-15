@@ -1,13 +1,16 @@
 package bot.kpq;
 
+import bot.Action;
 import bot.BotSession;
 import bot.ChannelSession;
 import bot.MapleConnection;
 import bot.WorldState;
+import bot.combat.CombatMath;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.random.RandomGenerator;
 
 /**
  * Entry point for one Kerning Party Quest bot. Every bot in a run is a separate process/character
@@ -27,10 +30,15 @@ import java.util.List;
  * java -cp ... bot.kpq.KpqBot maplestory 8484 kpqmem2 pass member 2
  * java -cp ... bot.kpq.KpqBot maplestory 8484 kpqmem3 pass member 3
  * </pre>
- * An optional trailing minutes argument overrides {@link #DEFAULT_RUN_BUDGET_MINUTES} - keep this
+ * An optional minutes argument overrides {@link #DEFAULT_RUN_BUDGET_MINUTES} - keep this
  * short (a few minutes) for anything exploratory, since a stuck bot should die on its own well before
  * a human notices, not run for the full PQ timer. {@link bot.MapleConnection}'s own outbound rate cap
  * bounds the damage a stuck loop can do either way; this is the second, independent layer.
+ *
+ * <p>Each basic attack rolls its damage like a client would, from the character's own level, stats and
+ * equipped gear as the server described them at world entry ({@link WorldState#getSelfStats()}) against
+ * the target's WZ level, defence and avoid ({@code bot.combat.DamageModel}), misses included. So the test
+ * characters need stats and a weapon that can actually hit Kerning PQ's monsters.
  */
 public class KpqBot {
     private static final int DEFAULT_RUN_BUDGET_MINUTES = 5;
@@ -62,11 +70,23 @@ public class KpqBot {
         }
 
         ChannelSession session = BotSession.loginAndEnterChannel(host, port, user, pass);
-        KpqPlanner planner = new KpqPlanner(role, ordinal, inviteNames, passesNeeded);
+        RandomGenerator rng = RandomGenerator.getDefault();
+        KpqPlanner planner = new KpqPlanner(role, ordinal, inviteNames, passesNeeded,
+                (world, self, monsterObjectId) -> attack(world, monsterObjectId, rng));
         try (MapleConnection channel = session.connection()) {
             BotSession.GameLoopResult result = BotSession.runGameLoop(channel, session.charId(), planner, runBudgetMs);
             report(role, result.world());
         }
+    }
+
+    private static Action attack(WorldState world, int monsterObjectId, RandomGenerator rng) {
+        WorldState.SelfStats stats = world.getSelfStats();
+        WorldState.MonsterSighting mob = world.getMonsters().stream()
+                .filter(m -> m.objectId() == monsterObjectId).findFirst().orElse(null);
+        if (stats == null || mob == null) {
+            return new Action.Idle();
+        }
+        return new Action.AttackMonster(monsterObjectId, CombatMath.basicLineDamage(stats, mob.monsterId(), rng));
     }
 
     private static void report(KpqPlanner.Role role, WorldState world) {

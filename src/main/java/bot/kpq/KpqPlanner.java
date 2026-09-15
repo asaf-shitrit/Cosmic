@@ -9,7 +9,10 @@ import java.awt.Rectangle;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.function.IntPredicate;
+import java.util.function.LongSupplier;
 
 /**
  * Drives one bot through Kerning Party Quest end to end: party formation, then whichever of the
@@ -27,7 +30,14 @@ import java.util.Optional;
  * leader) periodically retries the stage-advance portal, which is safe to attempt before it's actually
  * open (see {@link Action.UsePortal}).
  *
- * <p>Stage 5 (the boss) is out of scope for now - {@link #plan} goes idle once it detects that map.
+ * <p>Combat is supplied by an {@link AttackProvider}; this planner only selects targets and never
+ * assumes a damage value. Summoned companions attack with their character's real damage
+ * ({@code bot.combat.CombatController}); the standalone {@code KpqBot} chooses its own.
+ *
+ * <p>Two layouts. Pure-bot: a bot leader plus members, ordinals 0..3, the proven configuration.
+ * Human-led ({@link #summonedMember}/{@link #humanLeader}): a person leads and three summoned
+ * companions take ordinals 0..2, so the three puzzle positions are always companions and the leader
+ * stays outside them; combo windows are longer so a person can check with the NPC in time.
  */
 public class KpqPlanner implements Planner {
     public enum Role { LEADER, MEMBER }
@@ -40,6 +50,8 @@ public class KpqPlanner implements Planner {
     private static final long COMBO_WINDOW_MS = 2500;
     /** How far into a combo window the leader checks it with the NPC, giving positions time to land. */
     private static final long COMBO_CHECK_OFFSET_MS = 900;
+    private static final long HUMAN_COMBO_WINDOW_MS = 10_000;
+    private static final long HUMAN_COMBO_CHECK_OFFSET_MS = 3_000;
     /** How often a bot (re)tries the next-stage portal while waiting for the stage to actually clear. */
     private static final long PORTAL_RETRY_MS = 1500;
     /**
@@ -57,12 +69,12 @@ public class KpqPlanner implements Planner {
      */
     private static final long ACTION_RETRY_COOLDOWN_MS = 800;
     /**
-     * After this many unsuccessful attempts on the same drop/monster, stop retrying it and move on.
+     * After this many unsuccessful attempts on the same drop, stop retrying it and move on.
      * Live testing with 3-4 bots farming the same handful of mobs found every genuinely-still-valid
      * target succeeds on the very first attempt - a second attempt on the same oid is essentially
      * always "someone else already got it" (the removal broadcast is range-limited - see
      * {@code MapleMap#broadcastMessage(Packet, Point)} - so a distant bot's copy of
-     * {@link WorldState#getItemDrops()}/{@link WorldState#getMonsters()} can lag well behind reality).
+     * {@link WorldState#getItemDrops()} can lag well behind reality).
      * With 3-4 bots converging on the same handful of concurrently-visible targets, retrying a stale
      * one even a few times before giving up was measured costing whole *minutes* of wall-clock time
      * across a farming run - by far the largest inefficiency found, well beyond the base drop-rate
@@ -71,16 +83,32 @@ public class KpqPlanner implements Planner {
      */
     private static final int MAX_TARGET_ATTEMPTS = 1;
     /**
-     * Comfortably one-shots anything in this instance, stage 5 bosses included - see
-     * {@link Action.AttackMonster}'s javadoc on why there's no cap to stay under. Sized well past
-     * stage 1 mobs' actual HP (confirmed one-shot at the original 999,999) with a large margin for a
-     * boss that might have noticeably more.
+     * Monsters are different: with real damage one takes many swings, so the planner stays on it (see
+     * {@link #stickyMonster}). This only bounds a target that never dies from this bot's point of view,
+     * such as a missed KILL_MONSTER. It has to be generous: King Slime has 8,000 HP and 160 weapon
+     * defence, so a level-30 spearman's swings - misses and 1-damage lines included - average about 20,
+     * and one bot alone needs ~400. At 80, seen live, every bot gave up on the stage 5 bosses.
      */
-    private static final int ONE_SHOT_DAMAGE = 999_999_999;
+    private static final int MAX_HITS_PER_MONSTER = 600;
+    /** Close enough to swing without stepping first; matches CombatController.MELEE_RANGE. */
+    private static final int MELEE_RANGE = 110;
+    /** Stage 5 members retry the reward talk this often until the leader has cleared the stage. */
+    private static final long REWARD_TALK_RETRY_MS = 3000;
+
+    /** Supplies one attack on a monster; this planner paces the calls with its own cooldown. */
+    @FunctionalInterface
+    public interface AttackProvider {
+        Action attack(WorldState world, Point selfPosition, int monsterObjectId);
+    }
 
     private final Role role;
     /** 0 = leader, 1.. = members, in the fixed order used to assign stage 2-4 rectangle slots. */
     private final int ordinal;
+    private final int coordinationOwnerId;
+    /** When true, the real human leader is parked outside the three puzzle rectangles. */
+    private final boolean humanLeaderLayout;
+    private final AttackProvider attackProvider;
+    private final LongSupplier clock;
     /** Leader only: exact character names to invite. */
     private final List<String> inviteNames;
     /** Leader only: passes required at stage 1 (party size minus the leader). */
@@ -94,9 +122,9 @@ public class KpqPlanner implements Planner {
     private Stage1MemberState stage1State = Stage1MemberState.NEED_QUESTION;
     private int stage1TargetCoupons = -1;
 
-    private int lastMapChangeCount = -1;
     /** -1 = not yet in a stage map (recruit map or pre-login), 0..4 = stage 1..5. */
     private int stageIndex = -1;
+    private int lastObservedMapId = -1;
 
     private int inviteIndex = 0;
     private long lastPartyActionAt = 0;
@@ -106,8 +134,11 @@ public class KpqPlanner implements Planner {
     private WorldState.NpcTalk lastHandledTalk;
     private boolean setupDoneForStage = false;
     private int lastComboAttemptIndex = -1;
+    private long lastAnnouncementWindow = Long.MIN_VALUE;
     private Integer pendingAttackOid;
     private Integer pendingPickupOid;
+    /** The monster this bot is currently fighting, -1 for none; see {@link #stickyMonster}. */
+    private int currentMonsterOid = -1;
     /** oid -> attempts so far, for whichever drop/monster this bot is currently chasing (see {@link #MAX_TARGET_ATTEMPTS}). */
     private final Map<Integer, Integer> targetAttempts = new HashMap<>();
     /**
@@ -118,6 +149,10 @@ public class KpqPlanner implements Planner {
      * would fall straight back into "wait for more passes" instead of approaching the now-open portal.
      */
     private boolean stage1Cleared = false;
+    /** Leader, stages 2-4: the NPC has said this stage's portal is open. */
+    private boolean positionalStageOpen = false;
+    /** The NPC talk already on record when this stage was entered, so an old answer isn't read as new. */
+    private WorldState.NpcTalk talkAtStageEntry;
     /** True once {@link #idleOrTryPortal} has sent this attempt's approach {@code MoveTo}; see there. */
     private boolean portalApproached = false;
     /**
@@ -128,58 +163,73 @@ public class KpqPlanner implements Planner {
      * instance - so this just stops the leader from doing anything further, not from re-farming.
      */
     private boolean pqCleared = false;
+    /**
+     * Stage 5 member: the NPC has offered this member's reward (its "Incredible!" text, which
+     * {@code 9020001.js} only shows once {@code 5stageclear} is set), and the reply claims it and
+     * warps to the bonus map. Talking any earlier just gets the "welcome to the 5th stage" text.
+     */
+    private boolean stage5RewardOffered = false;
 
-    public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded) {
+    /** Pure-bot layout, as run by {@code KpqBot}. */
+    public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded,
+                      AttackProvider attackProvider) {
+        this(role, ordinal, -1, inviteNames, passesNeeded, false, attackProvider, System::currentTimeMillis);
+    }
+
+    KpqPlanner(Role role, int ordinal, int coordinationOwnerId, List<String> inviteNames,
+                       int passesNeeded, boolean humanLeaderLayout, AttackProvider attackProvider,
+                       LongSupplier clock) {
+        if (ordinal < 0 || ordinal > 3) {
+            throw new IllegalArgumentException("ordinal must be between 0 and 3");
+        }
         this.role = role;
         this.ordinal = ordinal;
-        this.inviteNames = inviteNames;
+        this.coordinationOwnerId = coordinationOwnerId;
+        this.inviteNames = List.copyOf(inviteNames);
         this.passesNeeded = passesNeeded;
+        this.humanLeaderLayout = humanLeaderLayout;
+        this.attackProvider = Objects.requireNonNull(attackProvider, "attackProvider");
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /**
+     * Creates the planner used by a summoned member after its normal follow/travel planner hands
+     * over. Summoned ordinals are deliberately 0..2: the human leader owns the outside slot.
+     */
+    public static KpqPlanner summonedMember(int ordinal, int ownerId, String ownerName,
+                                            AttackProvider attackProvider) {
+        if (ordinal < 0 || ordinal > 2) {
+            throw new IllegalArgumentException("summoned member ordinal must be 0..2");
+        }
+        return new KpqPlanner(Role.MEMBER, ordinal, ownerId, List.of(ownerName), 0, true, attackProvider,
+                System::currentTimeMillis);
+    }
+
+    /**
+     * The human leader's side of that layout. Nothing in the feature runs this - a person plays it -
+     * but the verification harness does, to stand in for that person.
+     */
+    public static KpqPlanner humanLeader(List<String> memberNames, AttackProvider attackProvider) {
+        return new KpqPlanner(Role.LEADER, 3, -1, memberNames, memberNames.size(), true, attackProvider,
+                System::currentTimeMillis);
     }
 
     @Override
     public Action plan(WorldState world, Point selfPosition) {
-        int mapChanges = world.getMapChangeCount();
-        // mapChanges is 0 until the very first SET_FIELD lands, which is NOT guaranteed to have
-        // happened yet the first time plan() is called: BotSession#runGameLoop sets its initial
-        // forceReplan=true before the loop even starts, so this can run on iteration 1 while
-        // SET_FIELD is still in flight. Found live: mapChanges==0 was falling into the "real
-        // transition" branch below (lastMapChangeCount starts at -1, so 0 != -1), computing
-        // newStageIndex = 0 - 2 = -2, which matches none of the phase branches and fell through to
-        // Phase.DONE - permanently, before the bot had even seen its first map. Every later tick then
-        // saw mapChanges go 0 -> 1 and recomputed newStageIndex = 1 - 2 = -1 (a genuine no-op, equal
-        // to the initial stageIndex), so phase never recovered - plan() silently returned Idle forever
-        // and not one packet after login ever reached the server. Guarding on mapChanges > 0 means
-        // the pre-SET_FIELD tick is simply not treated as a transition at all, same as if it had
-        // arrived one tick earlier.
-        if (mapChanges > 0 && mapChanges != lastMapChangeCount) {
-            lastMapChangeCount = mapChanges;
-            // mapChanges: 1 = just landed in the recruit map (login's own SET_FIELD), 2 = stage 1,
-            // 3 = stage 2, ... 6 = stage 5. Every KPQ warp is a forward step, so this simple mapping
-            // holds for the whole run. (WorldState#getSelfMapId now decodes the map id too; this
-            // counting predates it and is proven live, so it was left as is.)
-            int newStageIndex = mapChanges - 2;
-            if (newStageIndex != stageIndex) {
-                stageIndex = newStageIndex;
-                lastComboAttemptIndex = -1;
-                setupDoneForStage = false;
-                lastHandledTalk = null;
-                pendingAttackOid = null;
-                pendingPickupOid = null;
-                targetAttempts.clear();
-                stage1State = Stage1MemberState.NEED_QUESTION;
-                stage1TargetCoupons = -1;
-                stage1Cleared = false;
-                portalApproached = false;
-                pqCleared = false;
-                if (stageIndex == 0) {
-                    phase = Phase.IN_STAGE1;
-                } else if (stageIndex >= 1 && stageIndex <= 3) {
-                    phase = Phase.IN_STAGE_POSITIONAL;
-                } else if (stageIndex == 4) {
-                    phase = Phase.IN_STAGE5;
-                } else {
-                    phase = Phase.DONE;   // shouldn't happen - stage 5 has no next00 to warp past it
+        int mapId = world.getSelfMapId();
+        if (mapId > 0 && mapId != lastObservedMapId) {
+            lastObservedMapId = mapId;
+            int newStageIndex = stageIndexForMap(mapId);
+            if (mapId == KpqConstants.MAP_BONUS) {
+                phase = Phase.DONE;
+                stageIndex = -1;
+            } else if (newStageIndex == -1) {
+                if (stageIndex >= 0 || phase == Phase.DONE) {
+                    resetRun();
                 }
+            } else if (newStageIndex != stageIndex) {
+                enterStage(newStageIndex);
+                talkAtStageEntry = world.getLastNpcTalk();
             }
         }
 
@@ -194,15 +244,15 @@ public class KpqPlanner implements Planner {
         return switch (phase) {
             case PARTY_FORM -> planPartyForm(world);
             case PARTY_WAIT_START -> planPartyWaitStart(world);
-            case IN_STAGE1 -> role == Role.LEADER ? planStage1Leader(world) : planStage1Member(world);
+            case IN_STAGE1 -> role == Role.LEADER ? planStage1Leader(world) : planStage1Member(world, selfPosition);
             case IN_STAGE_POSITIONAL -> planStagePositional(world);
-            case IN_STAGE5 -> planStage5(world);
+            case IN_STAGE5 -> planStage5(world, selfPosition);
             case DONE -> new Action.Idle();
         };
     }
 
     private Action planPartyForm(WorldState world) {
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         if (role != Role.LEADER) {
             if (world.getPartyId() != -1) {
                 phase = Phase.PARTY_WAIT_START;
@@ -244,7 +294,7 @@ public class KpqPlanner implements Planner {
             return new Action.Idle();
         }
 
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         WorldState.NpcTalk talk = world.getLastNpcTalk();
         // msgType 4 = the "I want to participate" menu (9020000.js's sendSimple) - option 0 starts it.
         // A failure reply (msgType 0, "you cannot start this party quest yet...") is deliberately left
@@ -267,8 +317,8 @@ public class KpqPlanner implements Planner {
         return new Action.TalkToNpc(npc.get().objectId());
     }
 
-    private Action planStage1Member(WorldState world) {
-        long now = System.currentTimeMillis();
+    private Action planStage1Member(WorldState world, Point selfPosition) {
+        long now = clock.getAsLong();
         return switch (stage1State) {
             case NEED_QUESTION -> {
                 WorldState.NpcTalk talk = world.getLastNpcTalk();
@@ -319,7 +369,7 @@ public class KpqPlanner implements Planner {
                     int oid = pendingAttackOid;
                     pendingAttackOid = null;
                     lastFarmActionAt = now;
-                    yield new Action.AttackMonster(oid, ONE_SHOT_DAMAGE);
+                    yield attackProvider.attack(world, selfPosition, oid);
                 }
                 List<WorldState.ItemDrop> drops = world.getItemDrops().stream()
                         .filter(d -> d.itemId() == KpqConstants.ITEM_COUPON)
@@ -333,19 +383,8 @@ public class KpqPlanner implements Planner {
                     lastFarmActionAt = now;
                     yield new Action.MoveTo(drop.get().position());
                 }
-                List<WorldState.MonsterSighting> mobs = world.getMonsters().stream()
-                        .filter(m -> m.monsterId() == KpqConstants.MOB_STAGE1)
-                        .filter(m -> attemptsSoFar(m.objectId()) < MAX_TARGET_ATTEMPTS)
-                        .toList();
-                Optional<WorldState.MonsterSighting> mob = pickSpread(mobs);
-                if (mob.isPresent()) {
-                    int oid = mob.get().objectId();
-                    recordAttempt(oid);
-                    pendingAttackOid = oid;
-                    lastFarmActionAt = now;
-                    yield new Action.MoveTo(mob.get().position());
-                }
-                yield new Action.Idle();   // nothing alive/dropped/retryable right now
+                // Idle when nothing is alive, dropped or retryable right now.
+                yield fightMonster(world, selfPosition, now, id -> id == KpqConstants.MOB_STAGE1);
             }
             case SUBMITTING -> {
                 if (world.getEtcQuantity(KpqConstants.ITEM_PASS) > 0) {
@@ -385,7 +424,7 @@ public class KpqPlanner implements Planner {
     }
 
     private Action planStage1Leader(WorldState world) {
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         // Once cleared, stay cleared - see stage1Cleared's javadoc for why have alone can't tell
         // "already cleared" apart from "still waiting on the first pass".
         if (stage1Cleared) {
@@ -445,7 +484,7 @@ public class KpqPlanner implements Planner {
      * index, {@code ordinal}) alone - see the class javadoc on why that needs no message between bots.
      */
     private Action planStagePositional(WorldState world) {
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         Rectangle[] rects = KpqConstants.rectsForStage(stageIndex);
         int[][] combos = KpqConstants.combosForStage(stageIndex);
 
@@ -477,15 +516,34 @@ public class KpqPlanner implements Planner {
         // bot) - found live: that drift reached multiple seconds, more than a whole COMBO_WINDOW_MS,
         // so the correct combo could go untested by all three bots at once for a long stretch of
         // attempts purely from clock skew, not from the combo actually being wrong.
-        int attemptIndex = (int) ((now / COMBO_WINDOW_MS) % combos.length);
+        // Head for the portal only once the stage is known to be open, and until then stay put. The
+        // portal approach used to run between checks as well, and walking to the portal pulls a bot
+        // off its rectangle (stage 3's portal is ~650px from the rectangles), so whether a combo was
+        // tested with everyone in place came down to how the 1.5s portal cycle happened to line up
+        // with the 2.5s combo window. Seen live: a pure-bot party failing stage 3 for 11 minutes.
+        if (positionalStageOpen(world)) {
+            return idleOrTryPortal(now);
+        }
+
+        long windowMs = humanLeaderLayout ? HUMAN_COMBO_WINDOW_MS : COMBO_WINDOW_MS;
+        int attemptIndex = (int) ((now / windowMs) % combos.length);
         if (attemptIndex != lastComboAttemptIndex) {
             lastComboAttemptIndex = attemptIndex;
             return new Action.MoveTo(positionFor(rects, combos[attemptIndex]));
         }
 
+        if (humanLeaderLayout && role == Role.MEMBER && ordinal == 0) {
+            long window = now / windowMs;
+            if (window != lastAnnouncementWindow && now % windowMs >= 1_000) {
+                lastAnnouncementWindow = window;
+                return new Action.Say("Positions ready - check with Cloto now");
+            }
+        }
+
         if (role == Role.LEADER) {
-            long intoWindow = now % COMBO_WINDOW_MS;
-            if (intoWindow >= COMBO_CHECK_OFFSET_MS && now - lastNpcTalkAt >= NPC_TALK_COOLDOWN_MS) {
+            long intoWindow = now % windowMs;
+            long checkOffset = humanLeaderLayout ? HUMAN_COMBO_CHECK_OFFSET_MS : COMBO_CHECK_OFFSET_MS;
+            if (intoWindow >= checkOffset && now - lastNpcTalkAt >= NPC_TALK_COOLDOWN_MS) {
                 Optional<WorldState.NpcSighting> npc = findNpc(world, KpqConstants.NPC_STAGE);
                 if (npc.isPresent()) {
                     lastNpcTalkAt = now;
@@ -493,7 +551,27 @@ public class KpqPlanner implements Planner {
                 }
             }
         }
-        return idleOrTryPortal(now);
+        return new Action.Idle();
+    }
+
+    /**
+     * Stage 2-4 is open. The leader knows from the NPC's answer; a member only sees the leader arrive
+     * on the next stage (the party roster carries every member's map), so members follow the leader
+     * through rather than guessing. The leader is the human owner in the summoned layout.
+     */
+    private boolean positionalStageOpen(WorldState world) {
+        if (role == Role.LEADER) {
+            WorldState.NpcTalk talk = world.getLastNpcTalk();
+            // Identity, not equals: this stage's "portal opened" text is identical to the last stage's.
+            if (talk != null && talk != talkAtStageEntry && talk.npcId() == KpqConstants.NPC_STAGE
+                    && talk.text().contains("the portal opened")) {
+                positionalStageOpen = true;
+            }
+            return positionalStageOpen;
+        }
+        int leaderId = coordinationOwnerId > 0 ? coordinationOwnerId : world.getPartyLeaderId();
+        WorldState.PartyMember leader = world.getPartyMember(leaderId);
+        return leader != null && stageIndexForMap(leader.mapId()) == stageIndex + 1;
     }
 
     /**
@@ -504,12 +582,11 @@ public class KpqPlanner implements Planner {
      * needed here). Every bot, leader included, farms bosses identically; a non-leader immediately
      * hands off any pass it ends up holding exactly like stage 1's HANDED_OFF, while the leader keeps
      * its own and additionally scavenges any pass dropped by someone else. There's no {@code next00}
-     * on this map (confirmed against the WZ data) - completion is {@code eim.clearPQ()} firing when
-     * the leader submits, not a portal walk, so a cleared PQ just goes idle rather than approaching
-     * anything.
+     * on this map (confirmed against the WZ data). After the leader's clear response, members talk to
+     * the NPC once more to claim their reward and receive the scripted warp to {@code 103000805}.
      */
-    private Action planStage5(WorldState world) {
-        long now = System.currentTimeMillis();
+    private Action planStage5(WorldState world, Point selfPosition) {
+        long now = clock.getAsLong();
 
         if (role == Role.LEADER) {
             if (pqCleared) {
@@ -545,6 +622,33 @@ public class KpqPlanner implements Planner {
                 lastFarmActionAt = now;
                 return new Action.DropItem(KpqConstants.ITEM_PASS, have);
             }
+            // Once the boss pool and its drops are gone, ask the NPC for the reward until the leader has
+            // cleared the stage. Only its "Incredible!" text means the reward is on offer; answering
+            // that one runs giveEventReward and the warp to the bonus map (9020001.js status 1).
+            // "Gone" means nothing this bot would still act on: a pass whose one pickup attempt failed
+            // stays on the ground (and in WorldState) for good, and must not hold the reward back.
+            boolean bossesLeft = world.getMonsters().stream()
+                    .anyMatch(m -> isStage5Boss(m.monsterId()) && attemptsSoFar(m.objectId()) < MAX_HITS_PER_MONSTER);
+            boolean passesLeft = world.getItemDrops().stream()
+                    .anyMatch(d -> d.itemId() == KpqConstants.ITEM_PASS && attemptsSoFar(d.objectId()) < MAX_TARGET_ATTEMPTS);
+            if (!bossesLeft && !passesLeft) {
+                WorldState.NpcTalk talk = world.getLastNpcTalk();
+                if (talk != null && talk.npcId() == KpqConstants.NPC_STAGE && !talk.equals(lastHandledTalk)) {
+                    lastHandledTalk = talk;
+                    if (talk.text().contains("Incredible!")) {
+                        stage5RewardOffered = true;
+                        return new Action.RespondToNpc(talk.msgType(), true, null);
+                    }
+                    return new Action.Idle();   // not cleared yet; the script already disposed that talk
+                }
+                if (!stage5RewardOffered && now - lastNpcTalkAt >= REWARD_TALK_RETRY_MS) {
+                    Optional<WorldState.NpcSighting> npc = findNpc(world, KpqConstants.NPC_STAGE);
+                    if (npc.isPresent()) {
+                        lastNpcTalkAt = now;
+                        return new Action.TalkToNpc(npc.get().objectId());
+                    }
+                }
+            }
         }
 
         // Shared farming, both roles: kill a boss or pick up any pass on the ground. A member that
@@ -564,7 +668,7 @@ public class KpqPlanner implements Planner {
             int oid = pendingAttackOid;
             pendingAttackOid = null;
             lastFarmActionAt = now;
-            return new Action.AttackMonster(oid, ONE_SHOT_DAMAGE);
+            return attackProvider.attack(world, selfPosition, oid);
         }
         List<WorldState.ItemDrop> drops = world.getItemDrops().stream()
                 .filter(d -> d.itemId() == KpqConstants.ITEM_PASS)
@@ -578,19 +682,47 @@ public class KpqPlanner implements Planner {
             lastFarmActionAt = now;
             return new Action.MoveTo(drop.get().position());
         }
-        List<WorldState.MonsterSighting> bosses = world.getMonsters().stream()
-                .filter(m -> isStage5Boss(m.monsterId()))
-                .filter(m -> attemptsSoFar(m.objectId()) < MAX_TARGET_ATTEMPTS)
-                .toList();
-        Optional<WorldState.MonsterSighting> boss = pickSpread(bosses);
-        if (boss.isPresent()) {
-            int oid = boss.get().objectId();
-            recordAttempt(oid);
-            pendingAttackOid = oid;
-            lastFarmActionAt = now;
-            return new Action.MoveTo(boss.get().position());
+        // Idle when no boss or drop is visible: between kills, or the pool is exhausted.
+        return fightMonster(world, selfPosition, now, KpqPlanner::isStage5Boss);
+    }
+
+    /**
+     * One combat step against a matching monster: swing if already beside it, otherwise step to it
+     * and swing on the next action tick. Each step is one {@link #ACTION_RETRY_COOLDOWN_MS}-gated
+     * action like every other farming branch; the caller has already checked that cooldown.
+     */
+    private Action fightMonster(WorldState world, Point selfPosition, long now, IntPredicate monsterId) {
+        Optional<WorldState.MonsterSighting> mob = stickyMonster(world, monsterId);
+        if (mob.isEmpty()) {
+            return new Action.Idle();
         }
-        return new Action.Idle();   // no boss/drop visible - either between kills or the pool's exhausted
+        int oid = mob.get().objectId();
+        recordAttempt(oid);
+        lastFarmActionAt = now;
+        if (selfPosition != null
+                && selfPosition.distanceSq(mob.get().position()) <= (long) MELEE_RANGE * MELEE_RANGE) {
+            return attackProvider.attack(world, selfPosition, oid);
+        }
+        pendingAttackOid = oid;
+        return new Action.MoveTo(mob.get().position());
+    }
+
+    /**
+     * Keeps fighting the same monster until it is gone. Choosing afresh each tick with
+     * {@link #pickSpread} jumps to another monster whenever the list changes; with a one-shot attack
+     * that cost nothing, but with real damage it leaves many monsters wounded and few dead. A new
+     * target is still chosen with {@code pickSpread}, so bots spread across monsters as before.
+     */
+    private Optional<WorldState.MonsterSighting> stickyMonster(WorldState world, IntPredicate monsterId) {
+        List<WorldState.MonsterSighting> candidates = world.getMonsters().stream()
+                .filter(m -> monsterId.test(m.monsterId()))
+                .filter(m -> attemptsSoFar(m.objectId()) < MAX_HITS_PER_MONSTER)
+                .toList();
+        Optional<WorldState.MonsterSighting> current = candidates.stream()
+                .filter(m -> m.objectId() == currentMonsterOid).findFirst();
+        Optional<WorldState.MonsterSighting> chosen = current.isPresent() ? current : pickSpread(candidates);
+        currentMonsterOid = chosen.map(WorldState.MonsterSighting::objectId).orElse(-1);
+        return chosen;
     }
 
     private static boolean isStage5Boss(int monsterId) {
@@ -609,7 +741,9 @@ public class KpqPlanner implements Planner {
      * which is outside every rectangle by construction (it's where the map drops you in).
      */
     private Point positionFor(Rectangle[] rects, int[] combo) {
-        if (ordinal < 3) {
+        // In the summoned layout the real owner is the leader and must remain outside; members
+        // intentionally receive ordinals 0..2 so all three rectangles are always occupied.
+        if (!(humanLeaderLayout && role == Role.LEADER) && ordinal < 3) {
             int seen = 0;
             for (int j = 0; j < combo.length; j++) {
                 if (combo[j] == 1) {
@@ -622,6 +756,74 @@ public class KpqPlanner implements Planner {
             }
         }
         return KpqConstants.STAGE_PARK_SPOT[stageIndex];
+    }
+
+    static int stageIndexForMap(int mapId) {
+        for (int i = 0; i < KpqConstants.STAGE_MAPS.length; i++) {
+            if (KpqConstants.STAGE_MAPS[i] == mapId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * True between the two halves of a move-then-act step (step to a drop, then pick it up; step to
+     * a monster, then swing). Anything else that moves the bot in between - a companion walking back
+     * to heal its owner, say - makes the second half fail the server's range check, and a drop is
+     * only tried once ({@link #MAX_TARGET_ATTEMPTS}).
+     */
+    public boolean midStep() {
+        return pendingPickupOid != null || pendingAttackOid != null;
+    }
+
+    /** Returns whether the map is one of KPQ's five instance stages. */
+    public static boolean isStageMap(int mapId) {
+        return stageIndexForMap(mapId) >= 0;
+    }
+
+    private void enterStage(int newStageIndex) {
+        stageIndex = newStageIndex;
+        lastComboAttemptIndex = -1;
+        setupDoneForStage = false;
+        lastHandledTalk = null;
+        pendingAttackOid = null;
+        pendingPickupOid = null;
+        currentMonsterOid = -1;
+        targetAttempts.clear();
+        stage1State = Stage1MemberState.NEED_QUESTION;
+        stage1TargetCoupons = -1;
+        stage1Cleared = false;
+        portalApproached = false;
+        positionalStageOpen = false;
+        pqCleared = false;
+        stage5RewardOffered = false;
+        if (stageIndex == 0) {
+            phase = Phase.IN_STAGE1;
+        } else if (stageIndex <= 3) {
+            phase = Phase.IN_STAGE_POSITIONAL;
+        } else {
+            phase = Phase.IN_STAGE5;
+        }
+    }
+
+    private void resetRun() {
+        stageIndex = -1;
+        phase = Phase.PARTY_FORM;
+        inviteIndex = 0;
+        lastHandledTalk = null;
+        pendingAttackOid = null;
+        pendingPickupOid = null;
+        currentMonsterOid = -1;
+        targetAttempts.clear();
+        stage1State = Stage1MemberState.NEED_QUESTION;
+        stage1TargetCoupons = -1;
+        stage1Cleared = false;
+        pqCleared = false;
+        stage5RewardOffered = false;
+        setupDoneForStage = false;
+        lastComboAttemptIndex = -1;
+        portalApproached = false;
     }
 
     /**

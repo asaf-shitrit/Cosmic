@@ -25,6 +25,8 @@ final class KpqConstants {
     static final int NPC_STAGE = 9020001;
 
     static final int MAP_RECRUIT = 103000000;
+    /** Bonus/reward map reached by each member after the leader clears stage 5. */
+    static final int MAP_BONUS = 103000805;
     /** Stage maps in order: index 0 = stage 1 (103000800) .. index 4 = stage 5 (103000804). */
     static final int[] STAGE_MAPS = {103000800, 103000801, 103000802, 103000803, 103000804};
 
