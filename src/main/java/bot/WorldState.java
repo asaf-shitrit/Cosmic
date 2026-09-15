@@ -185,6 +185,14 @@ public class WorldState {
             changeVersion.incrementAndGet();
             return "monster " + removed.monsterId() + " (oid=" + removed.objectId() + ") removed";
         }
+        if (opcode == SendOpcode.DAMAGE_MONSTER.getValue()) {
+            // Deliberately not tracked. The server only broadcasts this for a couple of special skills:
+            // a normal attack goes through MapleMap.damageMonster, whose damage numbers are shown to the
+            // monster's controller rather than to the map. A witness therefore never sees another
+            // player's hits, so this cannot be used to tell that somebody else is fighting here. What
+            // can: the killer's own exp, which the database holds (see the hunt check in CLAUDE.md).
+            return null;
+        }
         if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
             int charId = p.readInt();
             if (charId == selfCharId) {

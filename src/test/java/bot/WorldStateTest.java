@@ -84,6 +84,30 @@ class WorldStateTest {
         return p;
     }
 
+    /** PacketCreator.killMonster: int oid and the animation byte twice. */
+    private static OutPacket monsterRemoved(int oid, int animation) {
+        OutPacket p = OutPacket.create(SendOpcode.KILL_MONSTER);
+        p.writeInt(oid);
+        p.writeByte(animation);
+        p.writeByte(animation);
+        return p;
+    }
+
+    /**
+     * A monster leaving this client's view is announced exactly like a death, so the packet cannot be
+     * used to tell that anything was killed. Kept as a test because the trap is easy to walk into: an
+     * earlier version of the harness counted these as kills and reported fights that never happened.
+     */
+    @Test
+    void aMonsterLeavingViewCarriesNothingThatProvesItDied() {
+        WorldState world = new WorldState(1);
+
+        feed(world, monsterRemoved(500, 0));
+        feed(world, monsterRemoved(500, 1));
+
+        assertEquals(0, world.getMonsters().size(), "it is gone from the map either way");
+    }
+
     @Test
     void aDropSomeoneElsePicksUpLeavesTheMap() {
         WorldState world = new WorldState(1);
