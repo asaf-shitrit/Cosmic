@@ -6,6 +6,7 @@ import bot.BotLog;
 import bot.BotSession;
 import bot.ChannelSession;
 import bot.MapleConnection;
+import bot.Planner;
 import bot.WorldState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,6 +14,9 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * One summoned bot: a real v83 client running on its own thread inside the server JVM, connected over
@@ -36,6 +40,21 @@ final class SummonedBot implements Runnable {
     private static final long LOGIN_RETRY_MS = 3000;
     private static final int RECENT_LOG_LINES = 30;
 
+    /**
+     * One summoned bot logs in at a time, from its first login packet until its first SET_FIELD.
+     * Every summoned bot connects from 127.0.0.1, and the login-to-channel handoff keeps per-IP,
+     * single-slot state: CHAR_SELECT stores the client's hwid in {@code HostHwidCache} under the remote
+     * IP, and {@code PlayerLoggedinHandler} takes it back out with
+     * {@code SessionCoordinator#pickLoginSessionHwid}. Two bots between those steps at once share one
+     * slot, so one of them finds it empty and gets {@code c.disconnect(true, false)} on a client with
+     * no player yet - which leaves the socket open and the character never loaded, so the bot just
+     * waits for a SET_FIELD that never comes. Seen live twice with 3 simultaneous summons: 3 channel
+     * connects, 2 characters loaded. A stuck holder can't wedge the queue for long: the watchdog stops
+     * a bot that isn't in the world within its login deadline and closes its socket, which releases
+     * the gate in {@link #run}'s {@code finally}.
+     */
+    private static final Semaphore LOGIN_GATE = new Semaphore(1, true);
+
     enum State { STARTING, IN_WORLD, STOPPING }
 
     final int ownerId;
@@ -50,6 +69,8 @@ final class SummonedBot implements Runnable {
 
     private final BotPartySupervisor supervisor;
 
+    /** When this bot got its turn at {@link #LOGIN_GATE}; 0 while still queued behind another bot. */
+    volatile long loginStartedAt;
     volatile int charId = -1;
     volatile boolean stopRequested;
     volatile long stopRequestedAt;
@@ -111,7 +132,13 @@ final class SummonedBot implements Runnable {
     @Override
     public void run() {
         BotLog.setSink(this::record);
+        AtomicBoolean gateHeld = new AtomicBoolean();
         try {
+            if (!acquireLoginGate()) {
+                return;             // stopped while queued
+            }
+            gateHeld.set(true);
+            loginStartedAt = System.currentTimeMillis();
             ChannelSession session = login();
             if (session == null) {
                 return;             // stopped while logging in
@@ -119,7 +146,14 @@ final class SummonedBot implements Runnable {
             WorldState world = new WorldState(session.charId());
             try (MapleConnection conn = session.connection()) {
                 charId = session.charId();
-                FollowPlanner planner = new FollowPlanner(ownerId, ownerName, slot);
+                FollowPlanner follow = new FollowPlanner(ownerId, ownerName, slot);
+                Planner planner = (w, self) -> {
+                    // First SET_FIELD: the channel has handled our PLAYER_LOGGEDIN, so the next bot may go.
+                    if (w.getMapChangeCount() > 0 && gateHeld.compareAndSet(true, false)) {
+                        LOGIN_GATE.release();
+                    }
+                    return follow.plan(w, self);
+                };
                 BotSession.runGameLoop(conn, charId, planner, MAX_SESSION_MS, () -> stopRequested, world);
                 leavePartyCleanly(conn, world);
             }
@@ -128,8 +162,21 @@ final class SummonedBot implements Runnable {
                 log.warn("Summoned bot {} (owner {}) crashed: {}. Recent bot log:\n{}", name, ownerName, e, recentLogText());
             }
         } finally {
+            if (gateHeld.compareAndSet(true, false)) {
+                LOGIN_GATE.release();
+            }
             supervisor.onBotExit(this);
         }
+    }
+
+    /** Waits for {@link #LOGIN_GATE}, giving up only if this bot is stopped meanwhile. */
+    private boolean acquireLoginGate() throws InterruptedException {
+        while (!LOGIN_GATE.tryAcquire(250, TimeUnit.MILLISECONDS)) {
+            if (stopRequested) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private ChannelSession login() throws Exception {
@@ -180,7 +227,7 @@ final class SummonedBot implements Runnable {
         }
     }
 
-    private String recentLogText() {
+    String recentLogText() {
         synchronized (recentLog) {
             return String.join("\n", recentLog);
         }

@@ -318,7 +318,12 @@ public final class BotPartySupervisor {
         if (!bot.placed && !inWorld) {
             // Covers both a login that hangs and one where the channel silently never loads the
             // character after PLAYER_LOGGEDIN (seen live: the bot sat connected with no SET_FIELD).
-            if (now - bot.startedAt > LOGIN_DEADLINE_MS) {
+            // Measured from its turn at the login gate: a bot queued behind a stuck one isn't stuck itself,
+            // and the stuck one is stopped (releasing the gate) by this same check.
+            long loginStartedAt = bot.loginStartedAt;
+            if (loginStartedAt > 0 && now - loginStartedAt > LOGIN_DEADLINE_MS) {
+                log.warn("Summoned bot {} didn't enter the world within {}s, stopping it. Recent bot log:\n{}",
+                        bot.name, LOGIN_DEADLINE_MS / 1000, bot.recentLogText());
                 bot.requestStop("couldn't log in");
             }
             return;
