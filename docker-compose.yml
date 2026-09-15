@@ -31,6 +31,6 @@ services:
       MYSQL_ROOT_PASSWORD: ""
       MYSQL_ALLOW_EMPTY_PASSWORD: yes
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"  # local tools only; never expose the passwordless root account
     volumes:
       - ./database/docker-db-data:/var/lib/mysql

@@ -196,8 +196,8 @@ server:
     LOGIN_ATTEMPT_DURATION: 120         #Period in seconds the login attempt remains registered on the system.
 
     #Ip Configuration
-    HOST: 192.168.1.201                 #WAN IPv4 address
-    LANHOST: 192.168.1.201              #LAN IPv4 address
+    HOST: 100.111.36.29                 #WAN IPv4 address
+    LANHOST: 100.111.36.29              #LAN IPv4 address
     LOCALHOST: 127.0.0.1            #Loopback IPv4 address
     GMSERVER: false
 
