@@ -97,7 +97,6 @@ public class KpqPlanner implements Planner {
     private int lastMapChangeCount = -1;
     /** -1 = not yet in a stage map (recruit map or pre-login), 0..4 = stage 1..5. */
     private int stageIndex = -1;
-    private long stageEnteredAt;
 
     private int inviteIndex = 0;
     private long lastPartyActionAt = 0;
@@ -161,7 +160,6 @@ public class KpqPlanner implements Planner {
             int newStageIndex = mapChanges - 2;
             if (newStageIndex != stageIndex) {
                 stageIndex = newStageIndex;
-                stageEnteredAt = System.currentTimeMillis();
                 lastComboAttemptIndex = -1;
                 setupDoneForStage = false;
                 lastHandledTalk = null;
@@ -470,15 +468,23 @@ public class KpqPlanner implements Planner {
             return new Action.TalkToNpc(npc.get().objectId());
         }
 
-        long elapsed = now - stageEnteredAt;
-        int attemptIndex = (int) ((elapsed / COMBO_WINDOW_MS) % combos.length);
+        // Indexed off the absolute wall clock, not each bot's own stageEnteredAt - see this method's
+        // javadoc update below. Every bot process reads the same OS clock (one Docker host), so this
+        // keeps every bot testing the *same* combo at the *same* real instant without needing any
+        // message between them; stageEnteredAt-relative timing let different bots drift out of phase
+        // with each other by however long each one's own portal retry cycle happened to take to
+        // actually walk through the stage-clear portal (PORTAL_RETRY_MS-gated, fully independent per
+        // bot) - found live: that drift reached multiple seconds, more than a whole COMBO_WINDOW_MS,
+        // so the correct combo could go untested by all three bots at once for a long stretch of
+        // attempts purely from clock skew, not from the combo actually being wrong.
+        int attemptIndex = (int) ((now / COMBO_WINDOW_MS) % combos.length);
         if (attemptIndex != lastComboAttemptIndex) {
             lastComboAttemptIndex = attemptIndex;
             return new Action.MoveTo(positionFor(rects, combos[attemptIndex]));
         }
 
         if (role == Role.LEADER) {
-            long intoWindow = elapsed % COMBO_WINDOW_MS;
+            long intoWindow = now % COMBO_WINDOW_MS;
             if (intoWindow >= COMBO_CHECK_OFFSET_MS && now - lastNpcTalkAt >= NPC_TALK_COOLDOWN_MS) {
                 Optional<WorldState.NpcSighting> npc = findNpc(world, KpqConstants.NPC_STAGE);
                 if (npc.isPresent()) {
