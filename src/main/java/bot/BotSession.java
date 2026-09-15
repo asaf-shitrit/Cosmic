@@ -8,6 +8,7 @@ import net.packet.OutPacket;
 import java.awt.Point;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -127,6 +128,7 @@ public class BotSession {
         String macs = "00-00-00-00-00-00";
 
         int charId;
+        String charName;
         int channelPort;
 
         try (MapleConnection login = MapleConnection.connect(host, loginPort, TIMEOUT_MS)) {
@@ -156,12 +158,17 @@ public class BotSession {
             BotLog.line("[ok]   character list received, " + count + " character(s) on this account");
 
             if (count == 0) {
-                String charName = deriveCharName(user);
+                charName = deriveCharName(user);
                 charId = createCharacter(login, charName);
                 BotLog.line("[ok]   created character '" + charName + "', id " + charId);
             } else {
                 charId = charList.readInt();    // addCharEntry -> addCharStats starts with the charId int
-                BotLog.line("[ok]   reusing existing character id " + charId);
+                // addCharStats writes the name as a fixed 13-byte NUL-padded field, not a length-prefixed
+                // string, so it must be read by width (same idiom as the party roster decode).
+                String raw = new String(charList.readBytes(13), StandardCharsets.US_ASCII);
+                int nul = raw.indexOf('\0');
+                charName = nul < 0 ? raw : raw.substring(0, nul);
+                BotLog.line("[ok]   reusing existing character '" + charName + "', id " + charId);
             }
 
             OutPacket select = MapleConnection.packet(RecvOpcode.CHAR_SELECT.getValue());
@@ -186,7 +193,7 @@ public class BotSession {
         channelConn.send(loggedIn);
         BotLog.line("[sent] PLAYER_LOGGEDIN charId=" + charId);
 
-        return new ChannelSession(channelConn, charId);
+        return new ChannelSession(channelConn, charId, charName);
     }
 
     /** LOGIN_STATUS came back with a non-zero reason ({@code PacketCreator.getLoginFailed} codes). */

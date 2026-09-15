@@ -6,5 +6,9 @@ package bot;
  * to get a character into the game world before doing its own thing from there (see
  * {@link BotSession} and {@link Spectator}).
  */
-public record ChannelSession(MapleConnection connection, int charId) {
+public record ChannelSession(MapleConnection connection, int charId, String charName) {
+    /**
+     * The bot's own character name. A bot needs this to tell whether a line of chat was addressed to
+     * it - the server says who is speaking but never reminds a client what it is called.
+     */
 }
