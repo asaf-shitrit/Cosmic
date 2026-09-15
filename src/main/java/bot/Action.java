@@ -68,10 +68,20 @@ public sealed interface Action {
      * {@code AbstractDealDamageHandler} trusts this value outright when {@code skill == 0} - the
      * whole MP-cost/mob-count validation block is gated behind {@code attack.skill != 0} - and even
      * the autoban distance/damage sanity checks are no-ops with {@code USE_AUTOBAN: false} (see
-     * {@code AbstractDealDamageHandler#parseDamage}/{@code #applyAttack}). One shot is enough for
-     * anything this quest throws at it.
+     * {@code AbstractDealDamageHandler#parseDamage}/{@code #applyAttack}). So the damage declared is
+     * the caller's choice; every caller rolls it like a client would ({@code bot.combat.DamageModel}),
+     * 0 meaning a miss.
      */
     record AttackMonster(int monsterObjectId, int damage) implements Action {}
+
+    /** A learned close-range skill attack. Damage is computed from the live character stats. */
+    record SkillAttackMonster(int monsterObjectId, int skillId, int damage) implements Action {}
+
+    /** Uses a learned self/party skill through the ordinary SPECIAL_MOVE packet. */
+    record CastSkill(int skillId, int skillLevel) implements Action {}
+
+    /** Consumes one finite USE inventory item at the observed slot. */
+    record UseItem(int itemId, int slot) implements Action {}
 
     /**
      * Picks up the map-dropped item {@code objectId}. {@code ItemPickupHandler} itself only rejects a

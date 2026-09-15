@@ -32,6 +32,9 @@ public class ActionExecutor {
             case Action.AcceptPartyInvite accept -> acceptPartyInvite(accept.partyId());
             case Action.RespondToNpc respond -> respondToNpc(respond.lastMsgType(), respond.proceed(), respond.selection());
             case Action.AttackMonster attack -> attackMonster(attack.monsterObjectId(), attack.damage());
+            case Action.SkillAttackMonster attack -> skillAttackMonster(attack.monsterObjectId(), attack.skillId(), attack.damage());
+            case Action.CastSkill cast -> castSkill(cast.skillId(), cast.skillLevel());
+            case Action.UseItem item -> useItem(item.itemId(), item.slot());
             case Action.PickupItem pickup -> pickupItem(pickup.objectId());
             case Action.DropItem drop -> dropItem(drop.itemId(), drop.quantity());
             case Action.UsePortal usePortal -> usePortal(usePortal.portalName());
@@ -158,10 +161,19 @@ public class ActionExecutor {
      * {@code parseDamage}), a delay short, the declared damage int, and a final 4-byte gap.
      */
     private void attackMonster(int monsterObjectId, int damage) throws IOException {
+        sendMeleeAttack(monsterObjectId, 0, damage);
+    }
+
+    private void skillAttackMonster(int monsterObjectId, int skillId, int damage) throws IOException {
+        sendMeleeAttack(monsterObjectId, skillId, damage);
+    }
+
+    /** The fields before the target are the melee shape parsed by AbstractDealDamageHandler. */
+    private void sendMeleeAttack(int monsterObjectId, int skillId, int damage) throws IOException {
         OutPacket p = MapleConnection.packet(RecvOpcode.CLOSE_RANGE_ATTACK.getValue());
         p.writeByte(0);                  // discarded leading byte
         p.writeByte(0x11);               // numAttacked=1 (high nibble), numDamage=1 (low nibble)
-        p.writeInt(0);                   // skill = 0, plain attack
+        p.writeInt(skillId);
         p.writeBytes(new byte[8]);       // discarded (would be a charge value for specific skills)
         p.writeByte(0);                  // display
         p.writeByte(0);                  // direction
@@ -176,6 +188,25 @@ public class ActionExecutor {
         p.writeShort(0);                 // delay
         p.writeInt(damage);
         p.writeBytes(new byte[4]);       // trailing gap parseDamage always skips after the damage line(s)
+        conn.send(p);
+    }
+
+    private void castSkill(int skillId, int level) throws IOException {
+        if (level <= 0) {
+            throw new IllegalArgumentException("cannot cast unlearned skill " + skillId);
+        }
+        OutPacket p = MapleConnection.packet(RecvOpcode.SPECIAL_MOVE.getValue());
+        p.writeInt(0); // client tick; SpecialMoveHandler only consumes the field
+        p.writeInt(skillId);
+        p.writeByte(level);
+        conn.send(p);
+    }
+
+    private void useItem(int itemId, int slot) throws IOException {
+        OutPacket p = MapleConnection.packet(RecvOpcode.USE_ITEM.getValue());
+        p.writeInt(0);
+        p.writeShort(slot);
+        p.writeInt(itemId);
         conn.send(p);
     }
 

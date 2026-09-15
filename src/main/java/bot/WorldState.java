@@ -44,6 +44,20 @@ public class WorldState {
 
     private record EtcSlotEntry(int itemId, int quantity) {}
 
+    /**
+     * This bot's own character as the server described it: base stats from {@code addCharStats} (kept
+     * current by {@code STAT_CHANGED}) and the summed bonuses of the equipped, non-cash gear from the
+     * inventory block of the world-entry {@code SET_FIELD}. What a client knows to roll its damage.
+     *
+     * @param weaponId the item in the weapon slot, 0 for none
+     */
+    public record SelfStats(int level, int job, int str, int dex, int int_, int luk,
+                            int weaponId, int gearStr, int gearDex, int gearInt, int gearLuk, int gearWatk, int gearAcc) {
+        SelfStats withBase(int level, int str, int dex, int int_, int luk) {
+            return new SelfStats(level, job, str, dex, int_, luk, weaponId, gearStr, gearDex, gearInt, gearLuk, gearWatk, gearAcc);
+        }
+    }
+
     private final int selfCharId;
     private final Map<Integer, NpcSighting> npcs = new ConcurrentHashMap<>();
     private final Map<Integer, MonsterSighting> monsters = new ConcurrentHashMap<>();
@@ -78,6 +92,7 @@ public class WorldState {
     private volatile int selfSpawnPortalId = -1;
     private volatile PartyInvite pendingPartyInvite;
     private volatile NpcTalk lastNpcTalk;
+    private volatile SelfStats selfStats;
 
     /** Bumped on every spawn/despawn/move so a planner loop can cheaply notice "something changed". */
     private final AtomicInteger changeVersion = new AtomicInteger();
@@ -173,6 +188,9 @@ public class WorldState {
         if (opcode == SendOpcode.NPC_TALK.getValue()) {
             return acceptNpcTalk(p);
         }
+        if (opcode == SendOpcode.STAT_CHANGED.getValue()) {
+            return acceptStatChanged(p);
+        }
         if (opcode == SendOpcode.PARTY_OPERATION.getValue()) {
             return acceptPartyOperation(p);
         }
@@ -180,6 +198,10 @@ public class WorldState {
             return acceptItemDrop(p);
         }
         if (opcode == SendOpcode.REMOVE_ITEM_FROM_MAP.getValue()) {
+            // PacketCreator.removeItemFromMap: byte animation (0 expire, 1 plain, 2 picked up, 4 explode),
+            // then the object id. Reading the id first used to miss every removal, so a picked-up or
+            // expired drop stayed in itemDrops for good.
+            p.readByte();
             int objectId = p.readInt();
             ItemDrop removed = itemDrops.remove(objectId);
             if (removed == null) {
@@ -449,12 +471,20 @@ public class WorldState {
             p.readInt();                                 // channel
             if (p.readByte() == 1) {
                 p.skip(1 + 2 + 3 * 4 + 8 + 1);
-                // addCharStats: id, name(13), gender, skin, face, hair, 3 pet longs, level, job,
-                // str/dex/int/luk/hp/maxhp/mp/maxmp, ap, sp, exp, fame, gachaExp - then the map id
-                p.skip(4 + 13 + 1 + 1 + 4 + 4 + 3 * 8 + 1 + 2 + 8 * 2 + 2 + 2 + 4 + 2 + 4);
+                // addCharStats: id, name(13), gender, skin, face, hair, 3 pet longs, then level, job,
+                // str/dex/int/luk, hp/maxhp/mp/maxmp, ap, sp, exp, fame, gachaExp - then the map id
+                p.skip(4 + 13 + 1 + 1 + 4 + 4 + 3 * 8);
+                int level = p.readByte() & 0xFF;
+                int job = p.readShort();
+                int str = p.readShort();
+                int dex = p.readShort();
+                int int_ = p.readShort();
+                int luk = p.readShort();
+                p.skip(2 * 4 + 2 + 2 + 4 + 2 + 4);
                 selfMapId = p.readInt();
                 selfSpawnPortalId = p.readByte() & 0xFF;
                 selfPosition = null;
+                selfStats = readEquippedGear(p, level, job, str, dex, int_, luk);
             } else {
                 p.skip(3 + 1);
                 selfMapId = p.readInt();
@@ -468,6 +498,99 @@ public class WorldState {
             selfPosition = null;
         }
         onMapChanged();
+    }
+
+    /**
+     * What follows the map id in {@code addCharacterInfo}, up to the end of the equipped items: the
+     * rest of {@code addCharStats}, buddy capacity, linked name, mesos, then {@code addInventoryInfo}'s
+     * slot limits, a timestamp and one {@code addItemInfo} per equipped item until a 0 slot short.
+     * Any layout surprise leaves the gear totals at zero rather than failing the map change.
+     */
+    private static SelfStats readEquippedGear(InPacket p, int level, int job, int str, int dex, int int_, int luk) {
+        int weaponId = 0;
+        int[] gear = new int[6];    // str, dex, int, luk, watk, acc
+        try {
+            p.readInt();                                 // the int that ends addCharStats
+            p.readByte();                                // buddy list capacity
+            if (p.readByte() != 0) {
+                p.readString();                          // linked name
+            }
+            p.readInt();                                 // mesos
+            p.skip(5 + 8);                               // five slot limits, timestamp
+            for (int slot = p.readShort(); slot != 0; slot = p.readShort()) {
+                int itemType = p.readByte();
+                int itemId = p.readInt();
+                boolean cash = p.readByte() != 0;
+                if (cash) {
+                    p.readLong();
+                }
+                p.readLong();                            // expiration
+                if (itemType != 1) {
+                    break;                               // equipped slots only ever hold equips
+                }
+                p.skip(1 + 1);                           // upgrade slots, level
+                int[] stats = new int[15];               // str dex int luk hp mp watk matk wdef mdef acc avoid hands speed jump
+                for (int i = 0; i < stats.length; i++) {
+                    stats[i] = p.readShort();
+                }
+                p.readString();                          // owner
+                p.readShort();                           // flag
+                p.skip(cash ? 10 : 1 + 1 + 4 + 4 + 8);
+                p.skip(8 + 4);
+                if (slot == 11) {
+                    weaponId = itemId;
+                }
+                gear[0] += stats[0];
+                gear[1] += stats[1];
+                gear[2] += stats[2];
+                gear[3] += stats[3];
+                gear[4] += stats[6];
+                gear[5] += stats[10];
+            }
+        } catch (RuntimeException e) {
+            return new SelfStats(level, job, str, dex, int_, luk, 0, 0, 0, 0, 0, 0, 0);
+        }
+        return new SelfStats(level, job, str, dex, int_, luk, weaponId, gear[0], gear[1], gear[2], gear[3], gear[4], gear[5]);
+    }
+
+    /**
+     * {@code PacketCreator.updatePlayerStats}: bool, int mask, then one value per set bit in ascending
+     * order. Only level and the four base stats are kept, and they all sit below HP (0x400), where
+     * every field width is known: skin byte, face and hair ints, 0x8 and level bytes, then shorts.
+     */
+    private String acceptStatChanged(InPacket p) {
+        SelfStats current = selfStats;
+        if (current == null) {
+            return null;
+        }
+        p.readByte();
+        int mask = p.readInt();
+        if ((mask & 0x3D0) == 0) {
+            return null;
+        }
+        int level = current.level(), str = current.str(), dex = current.dex(), int_ = current.int_(), luk = current.luk();
+        for (int bit = 0x1; bit <= 0x200; bit <<= 1) {
+            if ((mask & bit) == 0) {
+                continue;
+            }
+            switch (bit) {
+                case 0x1, 0x8 -> p.readByte();
+                case 0x2, 0x4 -> p.readInt();
+                case 0x10 -> level = p.readByte() & 0xFF;
+                case 0x40 -> str = p.readShort();
+                case 0x80 -> dex = p.readShort();
+                case 0x100 -> int_ = p.readShort();
+                case 0x200 -> luk = p.readShort();
+                default -> p.readShort();
+            }
+        }
+        selfStats = current.withBase(level, str, dex, int_, luk);
+        return "own stats now level " + level + ", STR " + str + " DEX " + dex + " INT " + int_ + " LUK " + luk;
+    }
+
+    /** This bot's own stats and gear; null until the world-entry SET_FIELD has been decoded. */
+    public SelfStats getSelfStats() {
+        return selfStats;
     }
 
     public int getSelfMapId() {
@@ -608,6 +731,11 @@ public class WorldState {
 
     public boolean isPartyLeader() {
         return partyId != -1 && partyLeaderId == selfCharId;
+    }
+
+    /** The party leader's character id, or -1 outside a party. */
+    public int getPartyLeaderId() {
+        return partyId == -1 ? -1 : partyLeaderId;
     }
 
     public Set<Integer> getPartyMemberIds() {
