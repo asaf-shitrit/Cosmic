@@ -124,6 +124,21 @@ public class BotSession {
     public static ChannelSession loginAndEnterChannel(String host, int loginPort, String user, String pass,
                                                       int channel, Consumer<MapleConnection> onConnect)
             throws IOException {
+        return loginAndEnterChannel(host, loginPort, user, pass, channel, onConnect, null);
+    }
+
+    /**
+     * As above, but a character this account has yet to create is named {@code preferredCharName} instead
+     * of a name derived from the account.
+     *
+     * <p>A companion's account is named for the machine and its character is named for players to read,
+     * so the caller - not {@link #deriveCharName} - decides what that character is called. The name must
+     * already be legal: {@code Character.canCreateChar} refuses a blocked, taken or malformed name
+     * <em>silently</em>, and the bot would then wait forever with nothing to read.
+     */
+    public static ChannelSession loginAndEnterChannel(String host, int loginPort, String user, String pass,
+                                                      int channel, Consumer<MapleConnection> onConnect,
+                                                      String preferredCharName) throws IOException {
         String hostString = randomHostString();
         String macs = "00-00-00-00-00-00";
 
@@ -158,7 +173,7 @@ public class BotSession {
             BotLog.line("[ok]   character list received, " + count + " character(s) on this account");
 
             if (count == 0) {
-                charName = deriveCharName(user);
+                charName = preferredCharName != null ? preferredCharName : deriveCharName(user);
                 charId = createCharacter(login, charName);
                 BotLog.line("[ok]   created character '" + charName + "', id " + charId);
             } else {

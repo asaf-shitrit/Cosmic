@@ -228,6 +228,20 @@ class FakePlayerServiceTest {
     }
 
     /**
+     * The GM command spawns on whatever map the GM is standing on, so the mix has to suit the map: a
+     * field gets grinders on the mobs, a town gets townsfolk. It used to always get townsfolk, which
+     * left a GM's crowd on a field standing on the ground instead of around the mobs.
+     */
+    @Test
+    void aFieldIsRecognisedByHavingMobSpawns() {
+        MapleMap field = flatMap(700);      // has a spawn point
+        MapleMap town = flatMap();          // no spawn points at all
+
+        assertTrue(FakePlayerService.getInstance().looksLikeField(field), "a map with mob spawns is a field");
+        assertFalse(FakePlayerService.getInstance().looksLikeField(town), "a map without them is a town");
+    }
+
+    /**
      * Fake players must never register as {@code MapObjectType.PLAYER}: several call sites cast
      * player map objects straight to {@code Character}, and registering one as a player crashes
      * the server. This is the guard on that invariant, not a style preference.

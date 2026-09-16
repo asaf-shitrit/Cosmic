@@ -20,6 +20,15 @@ services:
       - ./config.yaml:/opt/server/config.yaml
       - ./scripts:/opt/server/scripts
       - ./wz:/opt/server/wz
+      # The OKF bundles live in the repo, not the image: BOT_MEMORY_DIR and BOT_KNOWLEDGE_DIR are
+      # relative to the server directory, so without these mounts planning reads no corpus and every
+      # resident's episode or acquaintance write lands in container storage and dies with it.
+      - ../bot-memory:/opt/server/bot-memory
+      - ../bot-knowledge:/opt/server/bot-knowledge:ro
+    # The OpenRouter key. env_file rather than -e: the key must never appear in this file or the image.
+    # It lives outside the repo deliberately (see CLAUDE.md) and must never be committed.
+    env_file:
+      - ../bot.env
     environment:
       DB_HOST: "db" ## Remember if this is present it will OVERRIDE the host in the config.yaml, if you put here anything other than db, you'll need to change the config.yaml jdbc string to port 3307, and not port 3306
     

@@ -8,6 +8,7 @@ import bot.ChannelSession;
 import bot.MapleConnection;
 import bot.Planner;
 import bot.WorldState;
+import bot.budget.HumanPresence;
 import client.Character;
 import net.server.Server;
 import org.slf4j.Logger;
@@ -67,6 +68,18 @@ final class SummonedBot implements Runnable {
     /** 0-based slot among this owner's bots; also decides where it stands beside the owner. */
     final int slot;
     final String name;
+
+    /**
+     * The name the character actually has, which is the one players see: {@link CompanionNames} gives it
+     * a human name when the account has no character yet, and an existing companion keeps whatever it
+     * was created with. Null until the login has read it back.
+     */
+    volatile String characterName;
+
+    /** The name to show a person: the character's once it is known, the account's before that. */
+    String displayName() {
+        return characterName != null ? characterName : name;
+    }
     final long startedAt = System.currentTimeMillis();
 
     private final BotPartySupervisor supervisor;
@@ -193,13 +206,26 @@ final class SummonedBot implements Runnable {
 
     private ChannelSession login() throws Exception {
         String password = BotAccounts.issueSessionPassword(name);
+        // A human name for a character this account has yet to create. Best-effort: if the name lookup
+        // itself fails, the account name is still a legal (if charmless) fallback.
+        String preferredCharName = null;
+        try (java.sql.Connection con = tools.DatabaseConnection.getConnection()) {
+            preferredCharName = CompanionNames.available(ownerId, slot, CompanionNames.databaseLookup(con));
+        } catch (java.sql.SQLException e) {
+            log.warn("Couldn't look up a companion name for {}; falling back to the account name", name, e);
+        }
         for (int attempt = 1; ; attempt++) {
             if (stopRequested) {
                 return null;
             }
             try {
-                return BotSession.loginAndEnterChannel(LOGIN_HOST, LOGIN_PORT, name, password, channel - 1,
-                        conn -> connection = conn);
+                ChannelSession session = BotSession.loginAndEnterChannel(LOGIN_HOST, LOGIN_PORT, name, password,
+                        channel - 1, conn -> connection = conn, preferredCharName);
+                characterName = session.charName();
+                // Register what it is really called, so nothing mistakes this bot for a player. The account
+                // check in HumanPresence covers the moment before this line runs.
+                HumanPresence.registerBot(characterName);
+                return session;
             } catch (BotSession.LoginRejectedException e) {
                 if (e.reason() != 7 || attempt >= LOGIN_ATTEMPTS) {
                     throw e;

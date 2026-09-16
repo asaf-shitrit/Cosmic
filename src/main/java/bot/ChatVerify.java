@@ -41,6 +41,8 @@ import java.util.Set;
  */
 public final class ChatVerify {
     private static final long DEFAULT_BUDGET_SECONDS = 120;
+    /** How often the run prints its "players and kills so far" timeline. */
+    private static final long REPORT_EVERY_MS = 10_000;
     /** Matches the other verification harnesses: short reads keep the loop responsive to Ctrl-C. */
     private static final int READ_TIMEOUT_MS = 250;
 
@@ -68,6 +70,8 @@ public final class ChatVerify {
     private static void watch(MapleConnection conn, WorldState world, ChannelSession session, long budgetMs)
             throws IOException {
         long deadline = System.currentTimeMillis() + budgetMs;
+        long start = System.currentTimeMillis();
+        long nextReportAt = start + REPORT_EVERY_MS;
         int consumedSeq = 0;
         int heard = 0;
         int addressedToUs = 0;
@@ -75,7 +79,15 @@ public final class ChatVerify {
         boolean enteredWorld = false;
         String myName = session.charName();
 
-        while (System.currentTimeMillis() < deadline) {
+        long now;
+        while ((now = System.currentTimeMillis()) < deadline) {
+            if (now >= nextReportAt) {
+                // A timeline, not a total: whether kills start only after a companion appears is the
+                // difference between "my companion is hunting" and "someone else is on this map".
+                nextReportAt += REPORT_EVERY_MS;
+                System.out.printf("[watch] %3ds: players here=%d%n",
+                        (now - start) / 1000, world.getOtherPlayerCount());
+            }
             InPacket p;
             try {
                 p = conn.receive();
@@ -121,6 +133,7 @@ public final class ChatVerify {
         System.out.printf("bot name: %s (charId %d, map %d)%n", myName, session.charId(), world.getSelfMapId());
         System.out.printf("chat lines heard: %d from %d speaker(s) %s%n", heard, speakers.size(), speakers);
         System.out.printf("lines naming this bot: %d%n", addressedToUs);
+        System.out.printf("players on this map at the end: %d%n", world.getOtherPlayerCount());
         System.out.println(heard > 0
                 ? "CHAT VERIFY PASSED: a line typed in the client arrived here with its speaker resolved."
                 : "CHAT VERIFY INCONCLUSIVE: nothing was typed on this map inside the budget.");
