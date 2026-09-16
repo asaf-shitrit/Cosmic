@@ -20,9 +20,26 @@ import java.util.Optional;
  * for why the cadence cannot live on a thread of its own.
  */
 public class ActionExecutor {
+    /**
+     * A v83 character walks about 125 px/s, and that is the speed the client animates a walk at. A
+     * step's duration is its distance at this speed; the receiving client interpolates over it (see
+     * {@link #stepDurationMs}).
+     */
+    private static final int MS_PER_PIXEL = 8;
+    /** Longest interpolation one step may ask for, however far the step is - see {@link #stepDurationMs}. */
+    private static final int MAX_STEP_MS = 1_200;
+    private static final int MIN_STEP_MS = 100;
+    /** Stance bytes: 2/3 play the walk sprite, 4/5 the idle one, left is always the odd one. */
+    private static final int STANCE_WALK_RIGHT = 2;
+    private static final int STANCE_WALK_LEFT = 3;
+    private static final int STANCE_STAND_RIGHT = 4;
+    private static final int STANCE_STAND_LEFT = 5;
+
     private final MapleConnection conn;
     private final WorldState world;
     private final Speech speech;
+    /** Last side this bot moved towards; a purely vertical step keeps showing that facing. */
+    private boolean facingLeft;
 
     public ActionExecutor(MapleConnection conn, WorldState world) {
         this(conn, world, new Speech());
@@ -72,13 +89,21 @@ public class ActionExecutor {
      * {@code AbstractMovementPacketHandler#updatePosition} trusts whatever x/y the "absolute move"
      * fragment (command 0) carries to set the player's live position - there is no foothold lookup
      * and no distance/speed check against the previous position. That's the whole reason this bot
-     * doesn't need pathfinding: teleporting anywhere in one fragment is exactly as valid to the
-     * server as a real walk animation would be.
+     * doesn't need pathfinding: moving anywhere in one fragment is exactly as valid to the server as
+     * a real walk animation would be.
+     *
+     * <p>The server does not care about the last two fields, but the <em>clients watching</em> do:
+     * another player's movement is interpolated over the fragment's duration and animated by its
+     * stance. Sending stance 0 (standing) and duration 0 made companions snap from spot to spot -
+     * reported live as "they just zoom around, they are not actually walking". The walk stance and a
+     * distance-proportional duration are what turn the same legal move into a walk on every screen,
+     * exactly the convention {@code FakePlayer#getWalkMovement} uses.
      *
      * <p>There is no move acknowledgement packet, so {@link WorldState#setSelfPosition} is updated
      * optimistically the moment the packet is sent - the send succeeding is the only signal we get.
      */
     private void moveTo(Point target) throws IOException {
+        Point from = world.getSelfPosition();
         OutPacket p = MapleConnection.packet(RecvOpcode.MOVE_PLAYER.getValue());
         p.writeBytes(new byte[9]);      // header bytes MovePlayerHandler discards via p.skip(9)
         p.writeByte(1);                  // one movement fragment follows
@@ -86,10 +111,36 @@ public class ActionExecutor {
         p.writePos(target);
         p.writePos(new Point(0, 0));     // pixels-per-second wobble - cosmetic only
         p.writeShort(0);                 // foothold id - read but never validated server-side
-        p.writeByte(0);                  // stance (standing)
-        p.writeShort(0);                 // duration ms
+        p.writeByte(stanceFor(target, from));
+        p.writeShort(stepDurationMs(target, from));
         conn.send(p);
         world.setSelfPosition(target);
+    }
+
+    /**
+     * The stance the client animates the step with: walking sideways, standing when the step has no
+     * horizontal part (a drop, or the first move after login, when there is nothing to compare to).
+     */
+    private int stanceFor(Point target, Point from) {
+        if (from != null && target.x != from.x) {
+            facingLeft = target.x < from.x;
+            return facingLeft ? STANCE_WALK_LEFT : STANCE_WALK_RIGHT;
+        }
+        return facingLeft ? STANCE_STAND_LEFT : STANCE_STAND_RIGHT;
+    }
+
+    /**
+     * How long the client should take to cover the step, so it walks there instead of appearing there.
+     * A long catch-up step is capped: the server has already put the bot at the target, and letting the
+     * picture lag behind it for seconds would show a companion swinging at a monster from three screens
+     * away.
+     */
+    private static int stepDurationMs(Point target, Point from) {
+        if (from == null) {
+            return MIN_STEP_MS;
+        }
+        int distance = (int) Math.round(from.distance(target));
+        return Math.max(MIN_STEP_MS, Math.min(MAX_STEP_MS, distance * MS_PER_PIXEL));
     }
 
     /**
