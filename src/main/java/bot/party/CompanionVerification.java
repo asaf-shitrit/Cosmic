@@ -41,11 +41,14 @@ import java.util.random.RandomGenerator;
  * <p>Usage: {@code CompanionVerification host port owner pass observer observerPass seconds scenario [channel]}
  * with {@code channel} 1-based (default 1), so two scenarios can run side by side on different channels.
  * <ul>
- *   <li>{@code combat}: the owner (standing in Kerning City, hurt, level 30+) summons three companions,
- *       walks through {@code west00} into the field the observer is standing in, and waits there.
- *       Checks: companion attack broadcasts with positive, bounded damage; KILL_MONSTER; a heal and a
- *       party buff landing on the owner, by skill id, seen by both clients; the owner's HP rising;
- *       every companion spawning into the field after the owner (they followed through the portal).</li>
+ *   <li>{@code combat}: the owner (standing in Kerning City) summons three companions, walks through
+ *       {@code west00} into the field the observer is standing in, and waits there. Checks, for any
+ *       owner level: companion attack broadcasts with positive, bounded damage that varies per
+ *       companion; KILL_MONSTER; every companion spawning into the field after the owner (they
+ *       followed through the portal). An owner of level 30+ (hurt) also needs a heal and a party buff
+ *       landing on it, by skill id, seen by both clients, and its HP rising. Below 30 it needs the
+ *       mixed party instead: a MAGIC_ATTACK with Energy Bolt or Magic Claw, a RANGED_ATTACK with Arrow
+ *       Blow or Double Shot, and at least one critical line (a damage int with its top bit set).</li>
  *   <li>{@code kpq}: the owner (level 21-30, in Kerning City) summons three companions and then plays
  *       the leader with {@link KpqPlanner#humanLeader}, rolling its own damage from its stats. Checks:
  *       the stage NPC's clear text reaches the owner, and every stage map was entered. The observer is
@@ -61,6 +64,8 @@ public final class CompanionVerification {
     private static final int HEAL = 2301002;
     private static final int BLESS = 2301004;
     private static final int HYPER_BODY = 1301007;
+    private static final Set<Integer> MAGICIAN_ATTACKS = Set.of(2001004, 2001005);
+    private static final Set<Integer> BOWMAN_ATTACKS = Set.of(3001004, 3001005);
     private static final RandomGenerator OWNER_RNG = RandomGenerator.getDefault();
     /** Far above anything a level 30-70 companion's formula yields, far below the old 999,999,999. */
     private static final int ABSURD_DAMAGE = 5_000;
@@ -146,6 +151,9 @@ public final class CompanionVerification {
                     world.onSetField(p);
                     conn.send(MapleConnection.packet(RecvOpcode.PLAYER_MAP_TRANSFER.getValue()));
                     ev.ownerEnteredMap(world.getSelfMapId());
+                    if (world.getSelfStats() != null) {
+                        ev.ownerLevel = world.getSelfStats().level();
+                    }
                 } else {
                     int mark = p.getPosition();
                     ev.ownerPacket(opcode, p);
@@ -318,6 +326,7 @@ public final class CompanionVerification {
     /** What the two clients saw. Written by the owner thread and the observer thread. */
     private static final class Evidence {
         volatile int ownerId;
+        volatile int ownerLevel;
         volatile long kpqStartedAt;
         volatile long clearedAt;
         volatile int companionsInBonusMap;
@@ -327,6 +336,12 @@ public final class CompanionVerification {
         /** actor -> every damage line its attack broadcasts carried, 0 for a miss. */
         final Map<Integer, List<Integer>> damageByActor = new ConcurrentHashMap<>();
         final Set<Integer> attackSkills = ConcurrentHashMap.newKeySet();
+        /** actor -> "OPCODE skill" for every attack kind it was seen using. */
+        final Map<Integer, Set<String>> attackKindsByActor = new ConcurrentHashMap<>();
+        /** actor -> lines the server marked critical. */
+        final Map<Integer, Integer> critsByActor = new ConcurrentHashMap<>();
+        /** Projectile item ids shown in RANGED_ATTACK broadcasts. */
+        final Set<Integer> projectiles = ConcurrentHashMap.newKeySet();
         volatile int observerKills;
         final Set<Integer> effectsOnOwnerSeenByObserver = ConcurrentHashMap.newKeySet();
         /** Monsters a companion's attack broadcast named as its target. */
@@ -343,6 +358,8 @@ public final class CompanionVerification {
         private long lastHpRiseAt;
         /** actor -> damage lines of the companion attacks the owner saw (inside KPQ the observer can't). */
         final Map<Integer, List<Integer>> ownerSeenDamage = new ConcurrentHashMap<>();
+        final Map<Integer, Set<String>> ownerSeenKinds = new ConcurrentHashMap<>();
+        final Map<Integer, Integer> ownerSeenCrits = new ConcurrentHashMap<>();
         volatile int ownerSeenKills;
         final Map<Integer, Long> ownerMapsEntered = new TreeMap<>();
         volatile boolean clearText;
@@ -386,11 +403,13 @@ public final class CompanionVerification {
                     if (buffsOnOwner.add(buff)) {
                         log("[owner] GIVE_BUFF skill " + buff);
                     }
-                } else if (opcode == SendOpcode.CLOSE_RANGE_ATTACK.getValue()) {
-                    Attack a = readAttack(p);
-                    if (a != null && a.actor != ownerId) {
+                } else if (isAttack(opcode)) {
+                    Attack a = readAttack(opcode, p);
+                    if (a.actor != ownerId) {
                         ownerSeenDamage.computeIfAbsent(a.actor, k -> Collections.synchronizedList(new ArrayList<>()))
-                                .add(a.damage);
+                                .addAll(a.lines);
+                        ownerSeenKinds.computeIfAbsent(a.actor, k -> ConcurrentHashMap.newKeySet()).add(a.kind());
+                        ownerSeenCrits.merge(a.actor, a.crits, Integer::sum);
                     }
                 } else if (opcode == SendOpcode.KILL_MONSTER.getValue()) {
                     p.readInt();
@@ -431,18 +450,26 @@ public final class CompanionVerification {
 
         void observerPacket(int opcode, InPacket p) {
             try {
-                if (opcode == SendOpcode.CLOSE_RANGE_ATTACK.getValue()) {
-                    Attack a = readAttack(p);
-                    if (a == null || a.actor == ownerId) {
+                if (isAttack(opcode)) {
+                    Attack a = readAttack(opcode, p);
+                    if (a.actor == ownerId) {
                         return;
                     }
                     attackedMonsters.add(a.target);
                     List<Integer> lines = damageByActor.computeIfAbsent(a.actor,
                             k -> Collections.synchronizedList(new ArrayList<>()));
-                    if (lines.size() < 3 || !attackSkills.contains(a.skill)) {
-                        log("[observer] CLOSE_RANGE_ATTACK by " + a.actor + " skill " + a.skill + " damage " + a.damage);
+                    Set<String> kinds = attackKindsByActor.computeIfAbsent(a.actor, k -> ConcurrentHashMap.newKeySet());
+                    if (lines.size() < 6 || !kinds.contains(a.kind()) || (a.crits > 0 && critsByActor.getOrDefault(a.actor, 0) < 3)) {
+                        log("[observer] " + a.kind() + " by " + a.actor + " on oid " + a.target + " lines " + a.lines
+                                + (a.crits > 0 ? " (" + a.crits + " critical)" : "")
+                                + (a.projectile != 0 ? " projectile " + a.projectile : ""));
                     }
-                    lines.add(a.damage);
+                    lines.addAll(a.lines);
+                    kinds.add(a.kind());
+                    critsByActor.merge(a.actor, a.crits, Integer::sum);
+                    if (a.projectile != 0) {
+                        projectiles.add(a.projectile);
+                    }
                     attackSkills.add(a.skill);
                 } else if (opcode == SendOpcode.KILL_MONSTER.getValue()) {
                     // killMonster(oid, animation): 0 only removes it from view (Monster#sendDestroyData);
@@ -475,22 +502,49 @@ public final class CompanionVerification {
             }
         }
 
-        record Attack(int actor, int skill, int target, int damage) {}
+        record Attack(int opcode, int actor, int skill, int target, int projectile, List<Integer> lines, int crits) {
+            String kind() {
+                return SendOpcode.CLOSE_RANGE_ATTACK.getValue() == opcode ? "CLOSE_RANGE_ATTACK " + skill
+                        : SendOpcode.RANGED_ATTACK.getValue() == opcode ? "RANGED_ATTACK " + skill : "MAGIC_ATTACK " + skill;
+            }
+        }
 
-        /** PacketCreator.addAttackBody: int chr, byte counts, byte 0x5B, byte skillLevel, [int skill], 5 bytes, int projectile, per target: int oid, byte, int damage... */
-        private static Attack readAttack(InPacket p) {
+        static boolean isAttack(int opcode) {
+            return opcode == SendOpcode.CLOSE_RANGE_ATTACK.getValue() || opcode == SendOpcode.RANGED_ATTACK.getValue()
+                    || opcode == SendOpcode.MAGIC_ATTACK.getValue();
+        }
+
+        /**
+         * PacketCreator.addAttackBody, shared by all three attack broadcasts: int chr, byte counts, byte 0x5B,
+         * byte skillLevel, [int skill], display, direction, stance, speed, byte 0x0A, int projectile, then per
+         * target int oid, byte 0, one int per line. {@code parseDamage} rewrites a crit-capable job's line
+         * that is above its plain ceiling as {@code damage - 2^31}, which the client draws as a critical hit:
+         * the top bit is the flag and the low 31 bits the number shown.
+         */
+        private static Attack readAttack(int opcode, InPacket p) {
             int actor = p.readInt();
             int counts = p.readByte() & 0xFF;
             p.readByte();
             int skillLevel = p.readByte() & 0xFF;
             int skill = skillLevel > 0 ? p.readInt() : 0;
-            p.skip(5 + 4);
+            p.skip(5);
+            int projectile = p.readInt();
             if ((counts >>> 4) == 0) {
-                return new Attack(actor, skill, -1, 0);
+                return new Attack(opcode, actor, skill, -1, projectile, List.of(), 0);
             }
             int target = p.readInt();
             p.readByte();
-            return new Attack(actor, skill, target, p.readInt());
+            List<Integer> lines = new ArrayList<>();
+            int crits = 0;
+            for (int i = 0; i < (counts & 0xF); i++) {
+                int line = p.readInt();
+                if (line < 0) {
+                    crits++;
+                    line &= Integer.MAX_VALUE;
+                }
+                lines.add(line);
+            }
+            return new Attack(opcode, actor, skill, target, projectile, lines, crits);
         }
 
         /** PacketCreator.updatePlayerStats: bool, int mask, then each stat ascending by mask bit. */
@@ -517,12 +571,26 @@ public final class CompanionVerification {
 
         boolean combatPassed() {
             List<Integer> all = damageByActor.values().stream().flatMap(l -> List.copyOf(l).stream()).toList();
-            boolean spread = damageByActor.values().stream().anyMatch(l -> spread(l).stddev() > 0);
-            boolean support = effectsOnOwnerSeenByObserver.contains(HEAL) && ownerHpRisesWithHeal > 0
-                    && (buffsOnOwner.contains(BLESS) || buffsOnOwner.contains(HYPER_BODY));
+            // Every companion that landed a handful of hits rolled more than one value.
+            boolean spread = damageByActor.values().stream().anyMatch(l -> spread(l).stddev() > 0)
+                    && damageByActor.values().stream().filter(l -> List.copyOf(l).stream().filter(d -> d > 0).count() >= 5)
+                    .allMatch(l -> spread(l).stddev() > 0);
+            boolean roles;
+            if (ownerLevel >= 30) {
+                roles = effectsOnOwnerSeenByObserver.contains(HEAL) && ownerHpRisesWithHeal > 0
+                        && (buffsOnOwner.contains(BLESS) || buffsOnOwner.contains(HYPER_BODY));
+            } else {
+                roles = sawKind("MAGIC_ATTACK", MAGICIAN_ATTACKS) && sawKind("RANGED_ATTACK", BOWMAN_ATTACKS)
+                        && critsByActor.values().stream().mapToInt(Integer::intValue).sum() > 0;
+            }
             return observerFailure == null && all.stream().anyMatch(d -> d > 0) && spread
                     && all.stream().allMatch(d -> d >= 0 && d < ABSURD_DAMAGE)
-                    && observerKills > 0 && support && spawnedIntoField.size() >= 3;
+                    && observerKills > 0 && roles && spawnedIntoField.size() >= 3;
+        }
+
+        private boolean sawKind(String opcode, Set<Integer> skills) {
+            return attackKindsByActor.values().stream().flatMap(Set::stream)
+                    .anyMatch(k -> skills.stream().anyMatch(skill -> k.equals(opcode + " " + skill)));
         }
 
         record Spread(int lines, int misses, int min, int median, int max, double stddev) {
@@ -553,7 +621,11 @@ public final class CompanionVerification {
         void printSummary(String scenario) {
             log("=== evidence summary (" + scenario + ") ===");
             if (scenario.equals("combat")) {
-                damageByActor.forEach((actor, lines) -> log("companion " + actor + ": " + spread(lines)));
+                log("owner level " + ownerLevel);
+                damageByActor.forEach((actor, lines) -> log("companion " + actor + ": " + spread(lines)
+                        + "; critical lines " + critsByActor.getOrDefault(actor, 0) + "; attacks "
+                        + attackKindsByActor.getOrDefault(actor, Set.of())));
+                log("projectiles shown in RANGED_ATTACK: " + projectiles);
                 log("attack skill ids seen: " + attackSkills + "; deaths of monsters companions attacked: " + observerKills);
                 log("skills shown landing on the owner (observer): " + effectsOnOwnerSeenByObserver);
                 log("skills applied to owner (owner): " + effectsOnOwner + "; GIVE_BUFF ids: " + buffsOnOwner
@@ -567,7 +639,9 @@ public final class CompanionVerification {
                 long base = kpqStartedAt > 0 ? kpqStartedAt : 0;
                 ownerMapsEntered.forEach((map, at) -> log("entered " + map
                         + (base > 0 && at >= base ? " at +" + (at - base) / 1000 + "s" : "")));
-                ownerSeenDamage.forEach((actor, lines) -> log("companion " + actor + " (seen by owner): " + spread(lines)));
+                ownerSeenDamage.forEach((actor, lines) -> log("companion " + actor + " (seen by owner): " + spread(lines)
+                        + "; critical lines " + ownerSeenCrits.getOrDefault(actor, 0) + "; attacks "
+                        + ownerSeenKinds.getOrDefault(actor, Set.of())));
                 log("KILL_MONSTER deaths seen by owner: " + ownerSeenKills);
                 log("skills applied to owner: " + effectsOnOwner + "; GIVE_BUFF ids: " + buffsOnOwner);
                 log("companions that reached the bonus map after claiming their reward: " + companionsInBonusMap + " of 3");

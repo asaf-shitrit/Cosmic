@@ -62,8 +62,11 @@ function action(mode, type, selection) {
         } else if (choice == 3) {
             cm.sendOk("You can bring up to three companions. They come at your level, fight nearby monsters "
                 + "while staying close to you, and follow you between maps. They leave when you log out or change channels.\r\n\r\n"
-                + "Below level 30 all three are #bWarriors#k. From level 30 two are #bSpearmen#k who cast Hyper Body "
-                + "on you, and the third is a #bCleric#k who heals you and casts Bless. They carry Blue Potions for MP.\r\n\r\n"
+                + "Below level 10 they are #bBeginners#k, like you. From level 10 they fight the way their jobs do: "
+                + "one is a #bWarrior#k with Power Strike, one a #bMagician#k casting Energy Bolt and then Magic Claw, "
+                + "and one a #bBowman#k shooting Arrow Blow and then Double Shot, with Critical Shot as it grows.\r\n\r\n"
+                + "From level 30 two are #bSpearmen#k who cast Hyper Body on you, and the third is a #bCleric#k who "
+                + "heals you and casts Bless. They carry Blue Potions for MP, and the Bowman its own arrows.\r\n\r\n"
                 + "Speak to me to see who's with you or send them home.");
             cm.dispose();
         } else if (choice == 4) {

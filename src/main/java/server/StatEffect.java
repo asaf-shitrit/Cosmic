@@ -1812,6 +1812,11 @@ public class StatEffect {
         return prop == 1.0 || Math.random() < prop;
     }
 
+    /** The {@code prop} chance as a fraction, 1.0 when the data has none (e.g. Critical Shot level 20: 0.4). */
+    public double getProp() {
+        return prop;
+    }
+
     /*
      private static class CancelEffectAction implements Runnable {
 

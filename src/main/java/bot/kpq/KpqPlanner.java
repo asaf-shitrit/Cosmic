@@ -3,6 +3,7 @@ package bot.kpq;
 import bot.Action;
 import bot.Planner;
 import bot.WorldState;
+import bot.combat.AttackReach;
 import bot.pq.PartyQuestSession;
 
 import java.awt.Point;
@@ -13,6 +14,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.IntPredicate;
+import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -91,8 +93,6 @@ public class KpqPlanner implements PartyQuestSession {
      * and one bot alone needs ~400. At 80, seen live, every bot gave up on the stage 5 bosses.
      */
     private static final int MAX_HITS_PER_MONSTER = 600;
-    /** Close enough to swing without stepping first; matches CombatController.MELEE_RANGE. */
-    private static final int MELEE_RANGE = 110;
     /** Stage 5 members retry the reward talk this often until the leader has cleared the stage. */
     private static final long REWARD_TALK_RETRY_MS = 3000;
 
@@ -109,6 +109,8 @@ public class KpqPlanner implements PartyQuestSession {
     /** When true, the real human leader is parked outside the three puzzle rectangles. */
     private final boolean humanLeaderLayout;
     private final AttackProvider attackProvider;
+    /** How close this bot attacks from, {@link AttackReach#MELEE} unless a summoned member's job says otherwise. */
+    private final IntSupplier attackReach;
     private final LongSupplier clock;
     /** Leader only: exact character names to invite. */
     private final List<String> inviteNames;
@@ -174,12 +176,13 @@ public class KpqPlanner implements PartyQuestSession {
     /** Pure-bot layout, as run by {@code KpqBot}. */
     public KpqPlanner(Role role, int ordinal, List<String> inviteNames, int passesNeeded,
                       AttackProvider attackProvider) {
-        this(role, ordinal, -1, inviteNames, passesNeeded, false, attackProvider, System::currentTimeMillis);
+        this(role, ordinal, -1, inviteNames, passesNeeded, false, attackProvider, () -> AttackReach.MELEE,
+                System::currentTimeMillis);
     }
 
     KpqPlanner(Role role, int ordinal, int coordinationOwnerId, List<String> inviteNames,
                        int passesNeeded, boolean humanLeaderLayout, AttackProvider attackProvider,
-                       LongSupplier clock) {
+                       IntSupplier attackReach, LongSupplier clock) {
         if (ordinal < 0 || ordinal > 3) {
             throw new IllegalArgumentException("ordinal must be between 0 and 3");
         }
@@ -190,20 +193,23 @@ public class KpqPlanner implements PartyQuestSession {
         this.passesNeeded = passesNeeded;
         this.humanLeaderLayout = humanLeaderLayout;
         this.attackProvider = Objects.requireNonNull(attackProvider, "attackProvider");
+        this.attackReach = Objects.requireNonNull(attackReach, "attackReach");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
      * Creates the planner used by a summoned member after its normal follow/travel planner hands
      * over. Summoned ordinals are deliberately 0..2: the human leader owns the outside slot.
+     *
+     * @param attackReach read on every combat step, so a magician or bowman stands off at its reach
      */
     public static KpqPlanner summonedMember(int ordinal, int ownerId, String ownerName,
-                                            AttackProvider attackProvider) {
+                                            AttackProvider attackProvider, IntSupplier attackReach) {
         if (ordinal < 0 || ordinal > 2) {
             throw new IllegalArgumentException("summoned member ordinal must be 0..2");
         }
         return new KpqPlanner(Role.MEMBER, ordinal, ownerId, List.of(ownerName), 0, true, attackProvider,
-                System::currentTimeMillis);
+                attackReach, System::currentTimeMillis);
     }
 
     /**
@@ -212,7 +218,7 @@ public class KpqPlanner implements PartyQuestSession {
      */
     public static KpqPlanner humanLeader(List<String> memberNames, AttackProvider attackProvider) {
         return new KpqPlanner(Role.LEADER, 3, -1, memberNames, memberNames.size(), true, attackProvider,
-                System::currentTimeMillis);
+                () -> AttackReach.MELEE, System::currentTimeMillis);
     }
 
     @Override
@@ -688,8 +694,9 @@ public class KpqPlanner implements PartyQuestSession {
     }
 
     /**
-     * One combat step against a matching monster: swing if already beside it, otherwise step to it
-     * and swing on the next action tick. Each step is one {@link #ACTION_RETRY_COOLDOWN_MS}-gated
+     * One combat step against a matching monster: attack if already within reach, otherwise step into
+     * reach (onto it for melee, level with it and off to the side for spells and bows - see
+     * {@link AttackReach#approach}) and attack on the next action tick. Each step is one {@link #ACTION_RETRY_COOLDOWN_MS}-gated
      * action like every other farming branch; the caller has already checked that cooldown.
      */
     private Action fightMonster(WorldState world, Point selfPosition, long now, IntPredicate monsterId) {
@@ -700,12 +707,12 @@ public class KpqPlanner implements PartyQuestSession {
         int oid = mob.get().objectId();
         recordAttempt(oid);
         lastFarmActionAt = now;
-        if (selfPosition != null
-                && selfPosition.distanceSq(mob.get().position()) <= (long) MELEE_RANGE * MELEE_RANGE) {
+        int reach = attackReach.getAsInt();
+        if (selfPosition != null && AttackReach.inReach(selfPosition, mob.get().position(), reach)) {
             return attackProvider.attack(world, selfPosition, oid);
         }
         pendingAttackOid = oid;
-        return new Action.MoveTo(mob.get().position());
+        return new Action.MoveTo(AttackReach.approach(selfPosition, mob.get().position(), reach));
     }
 
     /**

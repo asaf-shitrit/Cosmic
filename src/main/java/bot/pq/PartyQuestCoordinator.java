@@ -78,8 +78,17 @@ public final class PartyQuestCoordinator {
             managedOrdinal = team.ordinal();
             PartyQuestContext context = new PartyQuestContext(
                     team.ordinal(), ownerId, ownerName, team.managedCompanionCount());
-            session = definition.createSession(context,
-                    (w, p, oid) -> combat.attackTarget(w, p, oid, CombatScope.FULL_MAP));
+            session = definition.createSession(context, new PartyQuestCombat() {
+                @Override
+                public Action attack(WorldState world, Point position, int monsterObjectId) {
+                    return combat.attackTarget(world, position, monsterObjectId, CombatScope.FULL_MAP);
+                }
+
+                @Override
+                public int attackReach() {
+                    return combat.attackReach();
+                }
+            });
         }
         activity = "helping with " + definition.displayName();
         if (session.midStep()) {

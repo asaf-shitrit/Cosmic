@@ -6,6 +6,7 @@ import net.packet.OutPacket;
 import java.awt.Point;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -51,6 +52,8 @@ public class ActionExecutor {
             case Action.RespondToNpc respond -> respondToNpc(respond.lastMsgType(), respond.proceed(), respond.selection());
             case Action.AttackMonster attack -> attackMonster(attack.monsterObjectId(), attack.damage());
             case Action.SkillAttackMonster attack -> skillAttackMonster(attack.monsterObjectId(), attack.skillId(), attack.damage());
+            case Action.MagicAttackMonster attack -> magicAttack(attack.monsterObjectId(), attack.skillId(), attack.damageLines());
+            case Action.RangedAttackMonster attack -> rangedAttack(attack.monsterObjectId(), attack.skillId(), attack.damageLines());
             case Action.CastSkill cast -> castSkill(cast.skillId(), cast.skillLevel());
             case Action.UseItem item -> useItem(item.itemId(), item.slot());
             case Action.PickupItem pickup -> pickupItem(pickup.objectId());
@@ -247,6 +250,83 @@ public class ActionExecutor {
         p.writeInt(damage);
         p.writeBytes(new byte[4]);       // trailing gap parseDamage always skips after the damage line(s)
         conn.send(p);
+    }
+
+    /**
+     * {@code MagicDamageHandler} parses with {@code parseDamage(p, chr, ranged=false, magic=true)}, and the
+     * magic flag changes nothing in the layout - only the ceiling it computes - so a spell is the melee
+     * shape under the {@code MAGIC_ATTACK} opcode, with one damage int per line. The skill must be a real,
+     * learned attack spell: the handler calls {@code SkillFactory.getSkill(attack.skill).getEffect(...)}
+     * unconditionally, so a skill-0 "magic" attack would throw. Energy Bolt and Magic Claw have no charge
+     * int (only Big Bang and the breath skills do).
+     */
+    private void magicAttack(int monsterObjectId, int skillId, List<Integer> damageLines) throws IOException {
+        if (skillId <= 0) {
+            throw new IllegalArgumentException("a magic attack needs an attack spell");
+        }
+        OutPacket p = attackHeader(RecvOpcode.MAGIC_ATTACK, skillId, damageLines.size());
+        p.writeByte(0);                  // discarded (the non-ranged branch's byte before speed)
+        p.writeByte(0);                  // speed
+        p.writeBytes(new byte[4]);       // discarded
+        writeTarget(p, monsterObjectId, damageLines);
+        conn.send(p);
+    }
+
+    /**
+     * {@code RangedAttackHandler} parses with {@code parseDamage(p, chr, ranged=true, magic=false)}, whose
+     * ranged branch is longer than melee's: after display/direction/stance comes a discarded byte, speed,
+     * a discarded byte, the range direction (used for the broadcast of Hurricane-style skills only), then
+     * 7 discarded bytes, then the usual per-target block.
+     *
+     * <p>Those 7 bytes are where a real client names its projectile slot, and the server ignores them:
+     * the handler walks the USE inventory from slot 1 for the first stack that fits the weapon (arrows
+     * {@code 206xxxx} for a bow) and holds at least the skill's {@code bulletCount}, and removes
+     * {@code bulletConsume} (else {@code bulletCount}) from that stack - Double Shot takes 2 arrows, a
+     * plain shot or Arrow Blow 1. With no such stack it neither broadcasts nor applies the damage, silently.
+     * It also dereferences the weapon slot unguarded, so the character must have a weapon on.
+     */
+    private void rangedAttack(int monsterObjectId, int skillId, List<Integer> damageLines) throws IOException {
+        OutPacket p = attackHeader(RecvOpcode.RANGED_ATTACK, skillId, damageLines.size());
+        p.writeByte(0);                  // discarded
+        p.writeByte(0);                  // speed
+        p.writeByte(0);                  // discarded
+        p.writeByte(0);                  // range direction
+        p.writeBytes(new byte[7]);       // discarded: the client's projectile slot fields, see above
+        writeTarget(p, monsterObjectId, damageLines);
+        conn.send(p);
+    }
+
+    /** {@code parseDamage}'s common start, for one target taking {@code lines} damage lines. */
+    private static OutPacket attackHeader(RecvOpcode opcode, int skillId, int lines) {
+        if (lines < 1 || lines > 15) {
+            throw new IllegalArgumentException("an attack carries 1..15 damage lines, got " + lines);
+        }
+        OutPacket p = MapleConnection.packet(opcode.getValue());
+        p.writeByte(0);                  // discarded leading byte
+        p.writeByte(0x10 | lines);       // numAttacked=1 (high nibble), numDamage=lines (low nibble)
+        p.writeInt(skillId);
+        p.writeBytes(new byte[8]);       // discarded
+        p.writeByte(0);                  // display
+        p.writeByte(0);                  // direction
+        p.writeByte(0);                  // stance
+        return p;
+    }
+
+    /**
+     * One target: object id, 4 discarded bytes, two positions that are read and dropped, the delay, one
+     * int per damage line, and 4 trailing bytes - skipped for every skill, since the condition guarding
+     * that skip ({@code skill != A || skill != B ...}) is always true.
+     */
+    private static void writeTarget(OutPacket p, int monsterObjectId, List<Integer> damageLines) {
+        p.writeInt(monsterObjectId);
+        p.writeBytes(new byte[4]);
+        p.writePos(new Point(0, 0));
+        p.writePos(new Point(0, 0));
+        p.writeShort(0);
+        for (int damage : damageLines) {
+            p.writeInt(damage);
+        }
+        p.writeBytes(new byte[4]);
     }
 
     private void castSkill(int skillId, int level) throws IOException {

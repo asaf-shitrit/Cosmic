@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import bot.Action;
 import bot.WorldState;
+import bot.combat.AttackReach;
 import io.netty.buffer.Unpooled;
 import net.opcodes.SendOpcode;
 import net.packet.ByteBufInPacket;
@@ -37,7 +38,8 @@ class KpqPlannerTest {
     }
 
     private static KpqPlanner planner() {
-        return KpqPlanner.summonedMember(0, 42, "Owner", (world, position, oid) -> new Action.Idle());
+        return KpqPlanner.summonedMember(0, 42, "Owner", (world, position, oid) -> new Action.Idle(),
+                () -> AttackReach.MELEE);
     }
 
     private static WorldState worldOn(int mapId) {

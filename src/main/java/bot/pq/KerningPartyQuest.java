@@ -27,6 +27,7 @@ final class KerningPartyQuest implements PartyQuestDefinition {
 
     @Override
     public PartyQuestSession createSession(PartyQuestContext context, PartyQuestCombat combat) {
-        return KpqPlanner.summonedMember(context.ordinal(), context.ownerId(), context.ownerName(), combat::attack);
+        return KpqPlanner.summonedMember(context.ordinal(), context.ownerId(), context.ownerName(),
+                combat::attack, combat::attackReach);
     }
 }

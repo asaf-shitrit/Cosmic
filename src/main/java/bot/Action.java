@@ -1,6 +1,7 @@
 package bot;
 
 import java.awt.Point;
+import java.util.List;
 
 /**
  * One thing the bot can do in the game world. A {@link Planner} decides which action to take next;
@@ -94,6 +95,26 @@ public sealed interface Action {
 
     /** A learned close-range skill attack. Damage is computed from the live character stats. */
     record SkillAttackMonster(int monsterObjectId, int skillId, int damage) implements Action {}
+
+    /**
+     * A learned attack spell ({@code MAGIC_ATTACK}) on one monster, one declared damage per line (Magic
+     * Claw: two), 0 meaning that line missed. The server spends the skill's MP when it applies it.
+     */
+    record MagicAttackMonster(int monsterObjectId, int skillId, List<Integer> damageLines) implements Action {
+        public MagicAttackMonster {
+            damageLines = List.copyOf(damageLines);
+        }
+    }
+
+    /**
+     * A bow or crossbow attack ({@code RANGED_ATTACK}) on one monster; {@code skillId} 0 is a plain shot.
+     * The server picks and consumes the arrows itself, so the character must hold some.
+     */
+    record RangedAttackMonster(int monsterObjectId, int skillId, List<Integer> damageLines) implements Action {
+        public RangedAttackMonster {
+            damageLines = List.copyOf(damageLines);
+        }
+    }
 
     /** Uses a learned self/party skill through the ordinary SPECIAL_MOVE packet. */
     record CastSkill(int skillId, int skillLevel) implements Action {}
