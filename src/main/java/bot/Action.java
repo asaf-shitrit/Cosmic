@@ -125,6 +125,13 @@ public sealed interface Action {
     record DropItem(int itemId, int quantity) implements Action {}
 
     /**
+     * Hits a map reactor using its object id from {@link WorldState}. Reactors use their own
+     * client opcode rather than the monster attack opcodes; the server advances the reactor state
+     * and runs its script after enough hits.
+     */
+    record HitReactor(int objectId) implements Action {}
+
+    /**
      * Walks through a named portal on the current map. {@code ChangeMapHandler} resolves the target
      * purely from {@code portalName} looked up on the character's current map (not from a client-sent
      * target map id - that field is only honoured for GM warps) and then runs the portal's own script

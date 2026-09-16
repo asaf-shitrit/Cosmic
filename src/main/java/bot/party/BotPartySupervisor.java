@@ -2,6 +2,8 @@ package bot.party;
 
 import bot.MapPortals;
 import bot.combat.CompanionLoadout;
+import bot.pq.PartyQuestTeam;
+import bot.pq.PartyQuestTeamPolicy;
 import client.Character;
 import net.server.PlayerStorage;
 import net.server.Server;
@@ -20,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -392,42 +395,52 @@ public final class BotPartySupervisor {
         catchUp(bot, self, owner, now);
     }
 
-    /**
-     * The human fills the leader role and all three managed companions fill the puzzle positions.
-     * Check instance identity as well as party membership: two parallel PQs share numeric map ids.
-     *
-     * @return null when {@code member} may play its part, otherwise why not (shown in "Who's
-     *         following me?" and logged, since a companion waiting here otherwise just stands still)
-     */
-    String kpqTeamProblem(SummonedBot member, Character self, Character owner) {
+    /** Resolves one definition's team policy and verifies every managed bot is in the same instance. */
+    PartyQuestTeam partyQuestTeam(SummonedBot member, PartyQuestTeamPolicy policy,
+                                  Character self, Character owner) {
         Party party = owner.getParty();
         if (party == null || party.getLeaderId() != owner.getId()) {
-            return "you aren't leading the party";
+            return PartyQuestTeam.blocked("you aren't leading the party");
         }
-        if (party.getMembers().size() != 4) {
-            return "the party has " + party.getMembers().size() + " members, not 4";
+        int partySize = party.getMembers().size();
+        if (partySize < policy.minPartySize() || partySize > policy.maxPartySize()) {
+            return PartyQuestTeam.blocked("the party has " + partySize + " members; it needs "
+                    + policy.minPartySize() + "-" + policy.maxPartySize());
         }
         if (owner.getEventInstance() == null || self.getEventInstance() != owner.getEventInstance()) {
-            return "not in the same party quest as you";
+            return PartyQuestTeam.blocked("not in the same party quest as you");
         }
         List<SummonedBot> companions = snapshotOf(member.ownerId);
-        if (companions.size() != 3) {
-            return companions.size() + " companions with you, not 3";
+        if (companions.size() < policy.minManagedCompanions()
+                || companions.size() > policy.maxManagedCompanions()) {
+            return PartyQuestTeam.blocked(companions.size() + " companions with you; it needs "
+                    + policy.minManagedCompanions() + "-" + policy.maxManagedCompanions());
         }
         PlayerStorage storage = owner.getWorldServer().getPlayerStorage();
         for (SummonedBot companion : companions) {
             Character character = storage.getCharacterById(companion.charId);
             if (companion.stopRequested || character == null) {
-                return companion.name + " is leaving";
+                return PartyQuestTeam.blocked(companion.name + " is leaving");
             }
             if (!companion.joinedParty || character.getParty() == null || character.getParty().getId() != party.getId()) {
-                return companion.name + " isn't in your party";
+                return PartyQuestTeam.blocked(companion.name + " isn't in your party");
             }
             if (character.getEventInstance() != owner.getEventInstance()) {
-                return companion.name + " isn't in your party quest";
+                return PartyQuestTeam.blocked(companion.name + " isn't in your party quest");
             }
         }
-        return null;
+        return PartyQuestTeam.ready(ordinalOf(companions, member), companions.size());
+    }
+
+    /**
+     * This companion's index among the live team, ordered by summon slot. Sessions divide work by
+     * ordinal, so a dense index is required: the slot left behind by a companion that dropped
+     * mid-instance would otherwise be both a wrong assignment and outside the team size.
+     */
+    private static int ordinalOf(List<SummonedBot> companions, SummonedBot member) {
+        List<SummonedBot> bySlot = new ArrayList<>(companions);
+        bySlot.sort(Comparator.comparingInt(bot -> bot.slot));
+        return bySlot.indexOf(member);
     }
 
     /**

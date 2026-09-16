@@ -174,6 +174,9 @@ public final class CompanionVerification {
                 boolean allHere = companions.stream().allMatch(m -> m.mapId() == world.getSelfMapId());
                 if (members.size() == 3 && allHere) {
                     log("owner now leads KPQ with " + members + ", own stats " + world.getSelfStats());
+                    // PartyQuestCoordinator drives the companion side only; the owner here stands in for
+                    // the human, so it plays KpqPlanner's LEADER role directly, exactly as the person
+                    // would - nothing in the feature routes a human through the companion coordinator.
                     active = KpqPlanner.humanLeader(members,
                             (w, self, oid) -> ownerAttack(w, oid));
                     ev.kpqStartedAt = now;

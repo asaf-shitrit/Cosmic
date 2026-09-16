@@ -27,6 +27,15 @@
 
 var status = 0;
 var em = null;
+var choice = -1;
+
+function supervisor() {
+    try {
+        return Java.type('bot.party.BotPartySupervisor').getInstance();
+    } catch (e) {
+        return null;
+    }
+}
 
 function start() {
     status = -1;
@@ -59,8 +68,9 @@ function action(mode, type, selection) {
                     return;
                 }
 
-                cm.sendSimple("#e#b<Party Quest: Primrose Hill>\r\n#k#n" + em.getProperty("party") + "\r\n\r\nI'm Tory. Inside here is a beautiful hill where the primrose blooms. There's a tiger that lives in the hill, Growlie, and he seems to be looking for something to eat. Would you like to head over to the hill of primrose and join forces with your party members to help Growlie out?#b\r\n#L0#I want to participate in the party quest.\r\n#L1#I would like to " + (cm.getPlayer().isRecvPartySearchInviteEnabled() ? "disable" : "enable") + " Party Search.\r\n#L2#I would like to hear more details.\r\n#L3#I would like to redeem an instance hat.");
+                cm.sendSimple("#e#b<Party Quest: Primrose Hill>\r\n#k#n" + em.getProperty("party") + "\r\n\r\nI'm Tory. Inside here is a beautiful hill where the primrose blooms. There's a tiger that lives in the hill, Growlie, and he seems to be looking for something to eat. Would you like to head over to the hill of primrose and join forces with your party members to help Growlie out?#b\r\n#L0#I want to participate in the party quest.\r\n#L1#I would like to " + (cm.getPlayer().isRecvPartySearchInviteEnabled() ? "disable" : "enable") + " Party Search.\r\n#L2#I would like to hear more details.\r\n#L3#I would like to redeem an instance hat.\r\n#L4#Call adventuring companions.\r\n#L5#Who is following me?\r\n#L6#Send my companions home.\r\n#L7#How do companions help in this party quest?");
             } else if (status == 1) {
+                choice = selection;
                 if (selection == 0) {
                     if (cm.getParty() == null) {
                         cm.sendOk("Hi there! I'm Tory. This place is covered with mysterious aura of the full moon, and no one person can enter here by him/herself.");
@@ -87,10 +97,41 @@ function action(mode, type, selection) {
                 } else if (selection == 2) {
                     cm.sendOk("#e#b<Party Quest: Primrose Hill>#k#n\r\nCollect primrose seeds from the flowers at the bottom part of the map and drop them by the platforms above the stage. Primrose seed color must match to grow the seeds, so test until you find the correct combination. When all the seeds have been planted, that is, starting second part of the mission, scout the Moon Bunny while it prepares Rice Cakes for the hungry Growlie. Once Growlie becomes satisfied, your mission is complete.");
                     cm.dispose();
-                } else {
+                } else if (selection == 3) {
                     cm.sendYesNo("So you want to exchange #b20 #b#t4001158##k for the instance-designed hat?");
+                } else if (selection == 4) {
+                    var sup = supervisor();
+                    if (sup == null) {
+                        cm.sendOk("My adventuring friends are unavailable right now.");
+                        cm.dispose();
+                    } else {
+                        var room = sup.summonCapacity(cm.getPlayer());
+                        if (room <= 0) {
+                            cm.sendOk(sup.summonBlockedReason(cm.getPlayer()));
+                            cm.dispose();
+                        } else {
+                            cm.sendGetNumber("How many should I call? Two companions are enough for this party quest. (1 - " + room + ")", Math.min(2, room), 1, room);
+                        }
+                    }
+                } else if (selection == 5) {
+                    cm.sendOk(supervisor() == null ? "My adventuring friends are unavailable right now." : supervisor().describe(cm.getPlayer()));
+                    cm.dispose();
+                } else if (selection == 6) {
+                    cm.sendOk(supervisor() == null ? "My adventuring friends are unavailable right now." : supervisor().dismiss(cm.getPlayer()));
+                    cm.dispose();
+                } else if (selection == 7) {
+                    cm.sendOk("Lead a party of #btwo or three companions#k and enter normally. They will gather and plant all six seed colors, protect the Moon Bunny, and bring its rice cakes to your feet. Pick up #b10 rice cakes#k and give them to #bGrowlie#k. You remain the party leader and handle the final turn-in.");
+                    cm.dispose();
+                } else {
+                    cm.dispose();
                 }
             } else {
+                if (choice == 4) {
+                    var sup = supervisor();
+                    cm.sendOk(sup == null ? "My adventuring friends are unavailable right now." : sup.summon(cm.getPlayer(), selection));
+                    cm.dispose();
+                    return;
+                }
                 if (cm.hasItem(4001158, 20)) {
                     if (cm.canHold(1002798)) {
                         cm.gainItem(4001158, -20);

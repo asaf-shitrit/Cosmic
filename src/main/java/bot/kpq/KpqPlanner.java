@@ -3,6 +3,7 @@ package bot.kpq;
 import bot.Action;
 import bot.Planner;
 import bot.WorldState;
+import bot.pq.PartyQuestSession;
 
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -39,7 +40,7 @@ import java.util.function.LongSupplier;
  * companions take ordinals 0..2, so the three puzzle positions are always companions and the leader
  * stays outside them; combo windows are longer so a person can check with the NPC in time.
  */
-public class KpqPlanner implements Planner {
+public class KpqPlanner implements PartyQuestSession {
     public enum Role { LEADER, MEMBER }
 
     /** Minimum gap between NPC talks - the server's own {@code BLOCK_NPC_RACE_CONDT} is 500ms. */
@@ -775,6 +776,17 @@ public class KpqPlanner implements Planner {
      */
     public boolean midStep() {
         return pendingPickupOid != null || pendingAttackOid != null;
+    }
+
+    /**
+     * Stages 2-4 are the positional puzzle: the party only clears a combo while everyone is standing
+     * in their rectangle, and the coordinator's support step would walk a companion back to its owner
+     * to heal or buff it. This replaces the map-range check {@code CombatController} used to carry for
+     * exactly these stages, now that combat scope is the caller's decision.
+     */
+    @Override
+    public boolean holdsPosition() {
+        return phase == Phase.IN_STAGE_POSITIONAL;
     }
 
     /** Returns whether the map is one of KPQ's five instance stages. */

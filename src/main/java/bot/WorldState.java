@@ -37,8 +37,12 @@ public class WorldState {
 
     public record MonsterSighting(int objectId, int monsterId, Point position) {}
 
+    /** A reactor currently visible on the map, including its latest broadcast state. */
+    public record ReactorSighting(int objectId, int reactorId, int state, Point position) {}
+
     /** A drop currently sitting on the map, as last reported by {@code DROP_ITEM_FROM_MAPOBJECT}. */
-    public record ItemDrop(int objectId, int itemId, Point position) {}
+    public record ItemDrop(int objectId, int itemId, Point position, int dropperObjectId,
+                           boolean playerDrop) {}
 
     /** An unanswered {@code PARTY_OPERATION} sub-opcode 4 (invite) this bot has not yet acted on. */
     public record PartyInvite(int partyId, String fromName) {}
@@ -76,6 +80,7 @@ public class WorldState {
     private final int selfCharId;
     private final Map<Integer, NpcSighting> npcs = new ConcurrentHashMap<>();
     private final Map<Integer, MonsterSighting> monsters = new ConcurrentHashMap<>();
+    private final Map<Integer, ReactorSighting> reactors = new ConcurrentHashMap<>();
     private final Map<Integer, Boolean> otherPlayers = new ConcurrentHashMap<>();
     /**
      * charId -> the last position the server holds for that player, from {@code SPAWN_PLAYER} and
@@ -184,6 +189,36 @@ public class WorldState {
             }
             changeVersion.incrementAndGet();
             return "monster " + removed.monsterId() + " (oid=" + removed.objectId() + ") removed";
+        }
+        if (opcode == SendOpcode.REACTOR_SPAWN.getValue()) {
+            int oid = p.readInt();
+            int reactorId = p.readInt();
+            int state = p.readByte() & 0xFF;
+            Point pos = p.readPos();
+            reactors.put(oid, new ReactorSighting(oid, reactorId, state, pos));
+            changeVersion.incrementAndGet();
+            return "reactor " + reactorId + " spawned at " + pointToString(pos) + " (oid=" + oid + ")";
+        }
+        if (opcode == SendOpcode.REACTOR_HIT.getValue()) {
+            int oid = p.readInt();
+            int state = p.readByte() & 0xFF;
+            Point pos = p.readPos();
+            ReactorSighting previous = reactors.get(oid);
+            if (previous == null) {
+                return null;
+            }
+            reactors.put(oid, new ReactorSighting(oid, previous.reactorId(), state, pos));
+            changeVersion.incrementAndGet();
+            return "reactor " + previous.reactorId() + " changed to state " + state;
+        }
+        if (opcode == SendOpcode.REACTOR_DESTROY.getValue()) {
+            int oid = p.readInt();
+            ReactorSighting removed = reactors.remove(oid);
+            if (removed == null) {
+                return null;
+            }
+            changeVersion.incrementAndGet();
+            return "reactor " + removed.reactorId() + " (oid=" + oid + ") removed";
         }
         if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
             int charId = p.readInt();
@@ -705,8 +740,8 @@ public class WorldState {
      * {@code PacketCreator.dropItemFromMapObject}, mod != 2 shape (the only shape a real item/meso
      * drop from a player or monster uses - mod == 2's shorter {@code updateMapItemObject} shape is
      * only sent for party-ownership refreshes, not covered here): byte mod, int oid, bool isMeso,
-     * int itemId, int ownerId, byte dropType, pos dropTo, ... (rest not needed - see class javadoc on
-     * under-reading self-contained frames).
+     * int itemId, int ownerId, byte dropType, pos dropTo, int dropperOid, pos dropFrom, short delay,
+     * expiration, byte nonPlayerDrop.
      */
     private String acceptItemDrop(InPacket p) {
         int mod = p.readByte() & 0xFF;
@@ -719,10 +754,17 @@ public class WorldState {
         p.readInt();               // clientside owner id (char or party id) - not needed
         p.readByte();              // drop type
         Point pos = p.readPos();
+        int dropperObjectId = p.readInt();
+        if (mod != 2) {
+            p.readPos();
+            p.readShort();
+        }
         if (isMeso) {
             return null;           // mesos aren't a quest item this bot ever needs to pick up
         }
-        itemDrops.put(objectId, new ItemDrop(objectId, itemId, pos));
+        p.readLong();               // item expiration
+        boolean playerDrop = p.readByte() == 0;
+        itemDrops.put(objectId, new ItemDrop(objectId, itemId, pos, dropperObjectId, playerDrop));
         changeVersion.incrementAndGet();
         return "item " + itemId + " dropped at " + pointToString(pos) + " (oid=" + objectId + ")";
     }
@@ -796,6 +838,7 @@ public class WorldState {
     public void onMapChanged() {
         npcs.clear();
         monsters.clear();
+        reactors.clear();
         itemDrops.clear();
         playerNames.clear();
         synchronized (chatLog) {
@@ -851,6 +894,10 @@ public class WorldState {
 
     public Collection<ItemDrop> getItemDrops() {
         return Collections.unmodifiableCollection(itemDrops.values());
+    }
+
+    public Collection<ReactorSighting> getReactors() {
+        return Collections.unmodifiableCollection(reactors.values());
     }
 
     /** Total quantity of {@code itemId} held across the ETC inventory, or 0 if none is held. */

@@ -4,14 +4,14 @@ import bot.Action;
 import bot.Planner;
 import bot.WorldState;
 import bot.combat.CombatController;
-import bot.kpq.KpqPlanner;
+import bot.pq.PartyQuestCoordinator;
 import client.Character;
-import scripting.event.EventInstanceManager;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.awt.Point;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -28,8 +28,7 @@ final class CompanionPlanner implements Planner {
     private final Supplier<Character> ownerSupplier;
     private final FollowPlanner follow;
     private final CombatController combat;
-    private KpqPlanner kpq;
-    private EventInstanceManager lastInstance;
+    private final PartyQuestCoordinator partyQuests;
 
     CompanionPlanner(SummonedBot bot, BotPartySupervisor supervisor,
                      Supplier<Character> selfSupplier, Supplier<Character> ownerSupplier) {
@@ -39,6 +38,9 @@ final class CompanionPlanner implements Planner {
         this.ownerSupplier = ownerSupplier;
         follow = new FollowPlanner(bot.ownerId, bot.ownerName, bot.slot);
         combat = new CombatController(selfSupplier, ownerSupplier);
+        partyQuests = new PartyQuestCoordinator(bot.ownerId, bot.ownerName,
+                selfSupplier, ownerSupplier, combat,
+                (policy, self, owner) -> supervisor.partyQuestTeam(bot, policy, self, owner));
     }
 
     @Override
@@ -61,37 +63,16 @@ final class CompanionPlanner implements Planner {
             return new Action.Idle();
         }
 
-        if (KpqPlanner.isStageMap(world.getSelfMapId())) {
-            String problem = supervisor.kpqTeamProblem(bot, self, owner);
-            if (problem != null) {
-                String activity = "waiting for the Kerning party: " + problem;
-                if (!activity.equals(bot.activity)) {
-                    log.info("Summoned bot {} is {}", bot.name, activity);
-                }
-                bot.activity = activity;
-                return new Action.Idle();
+        Optional<Action> partyQuestAction = partyQuests.planIfActive(world, position);
+        if (partyQuestAction.isPresent()) {
+            String activity = partyQuests.activity();
+            if (activity != null && !activity.equals(bot.activity)) {
+                log.info("Summoned bot {} is {}", bot.name, activity);
             }
-            EventInstanceManager instance = self.getEventInstance();
-            if (kpq == null || lastInstance != instance) {
-                kpq = KpqPlanner.summonedMember(bot.slot, bot.ownerId, bot.ownerName, combat::attackTarget);
-                lastInstance = instance;
-            }
-            bot.activity = "helping with Kerning Party Quest";
-            if (kpq.midStep()) {
-                // Seen live: a spearman stepped back to recast Hyper Body between its step to a
-                // coupon and the pickup, and ItemPickupHandler rejected the pickup as too far away.
-                return kpq.plan(world, position);
-            }
-            Action recover = combat.recover();
-            if (!(recover instanceof Action.Idle)) {
-                return recover;
-            }
-            Action support = combat.support(world, position, false);
-            return support instanceof Action.Idle ? kpq.plan(world, position) : support;
+            bot.activity = activity;
+            return partyQuestAction.get();
         }
 
-        kpq = null;
-        lastInstance = null;
         if (self.getMap() != owner.getMap()) {
             bot.activity = "catching up";
             return follow.plan(world, position);

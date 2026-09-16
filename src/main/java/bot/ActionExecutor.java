@@ -55,6 +55,7 @@ public class ActionExecutor {
             case Action.UseItem item -> useItem(item.itemId(), item.slot());
             case Action.PickupItem pickup -> pickupItem(pickup.objectId());
             case Action.DropItem drop -> dropItem(drop.itemId(), drop.quantity());
+            case Action.HitReactor hit -> hitReactor(hit.objectId());
             case Action.UsePortal usePortal -> usePortal(usePortal.portalName());
             case Action.ChangeChannel cc -> changeChannel(cc.channel());
             case Action.Idle ignored -> { /* nothing to send */ }
@@ -299,6 +300,21 @@ public class ActionExecutor {
         p.writeShort(slot.get());
         p.writeShort(0);                 // action == 0 selects InventoryManipulator.drop
         p.writeShort(quantity);
+        conn.send(p);
+    }
+
+    /**
+     * {@code ReactorHitHandler}: oid, the character's x coordinate, stance, a discarded int and
+     * skill id. Reactor hits are paced by the calling planner like monster attacks.
+     */
+    private void hitReactor(int objectId) throws IOException {
+        OutPacket p = MapleConnection.packet(RecvOpcode.DAMAGE_REACTOR.getValue());
+        p.writeInt(objectId);
+        Point position = world.getSelfPosition();
+        p.writeInt(position == null ? 0 : position.x);
+        p.writeShort(0);                 // standing stance
+        p.writeInt(0);                   // ReactorHitHandler discards this field
+        p.writeInt(0);                   // basic attack, no skill
         conn.send(p);
     }
 

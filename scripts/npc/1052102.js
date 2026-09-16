@@ -42,7 +42,7 @@ function action(mode, type, selection) {
             + "#L1#Who's following me?#l\r\n"
             + "#L2#Send my friends home#l\r\n"
             + "#L3#How do companions work?#l\r\n"
-            + "#L4#How do we run Kerning Party Quest?#l");
+            + "#L4#How do companions handle party quests?#l");
     } else if (status == 1) {
         choice = selection;
         if (choice == 0) {
@@ -67,13 +67,16 @@ function action(mode, type, selection) {
                 + "Speak to me to see who's with you or send them home.");
             cm.dispose();
         } else if (choice == 4) {
-            cm.sendOk("For Kerning Party Quest, you must be level #b21-30#k and lead a party with "
+            cm.sendOk("#eKerning Party Quest#n\r\nYou must be level #b21-30#k and lead a party with "
                 + "#bthree of your companions#k. Wait until all three arrive, then talk to #bLakelis#k.\r\n\r\n"
                 + "Your companions collect coupons and drop their passes for you. Pick those passes up and "
                 + "talk to #bCloto#k to clear the stage.\r\n\r\n"
                 + "In the rope, platform and barrel puzzles, stay by Cloto, off the puzzle positions. "
                 + "Your companions try the positions; check with Cloto when they tell you they're ready. "
-                + "After the last fight, gather ten passes and give them to Cloto.");
+                + "After the last fight, gather ten passes and give them to Cloto.\r\n\r\n"
+                + "#eHenesys Moon Bunny Party Quest#n\r\nLead #btwo or three companions#k and enter through Tory. "
+                + "They plant the seeds, defend the Moon Bunny, and drop its cakes at your feet. Pick up ten "
+                + "cakes and give them to Growlie.");
             cm.dispose();
         } else {
             cm.dispose();

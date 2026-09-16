@@ -19,8 +19,12 @@ class WorldStateTest {
         world.accept(in.readShort() & 0xFFFF, in);
     }
 
-    /** The layout of PacketCreator.dropItemFromMapObject for an item, up to what WorldState reads. */
+    /** The layout of PacketCreator.dropItemFromMapObject for an item. */
     private static OutPacket drop(int oid, int itemId) {
+        return drop(oid, itemId, 77, false);
+    }
+
+    private static OutPacket drop(int oid, int itemId, int dropperOid, boolean playerDrop) {
         OutPacket p = OutPacket.create(SendOpcode.DROP_ITEM_FROM_MAPOBJECT);
         p.writeByte(1);
         p.writeInt(oid);
@@ -29,6 +33,41 @@ class WorldStateTest {
         p.writeInt(0);
         p.writeByte(2);
         p.writePos(new Point(10, 20));
+        p.writeInt(dropperOid);
+        p.writePos(new Point(5, 20));
+        p.writeShort(0);
+        p.writeLong(0);
+        p.writeByte(playerDrop ? 0 : 1);
+        return p;
+    }
+
+    private static OutPacket reactorSpawn(int oid, int reactorId, int state, Point position) {
+        OutPacket p = OutPacket.create(SendOpcode.REACTOR_SPAWN);
+        p.writeInt(oid);
+        p.writeInt(reactorId);
+        p.writeByte(state);
+        p.writePos(position);
+        p.writeByte(0);
+        p.writeShort(0);
+        return p;
+    }
+
+    private static OutPacket reactorHit(int oid, int state, Point position) {
+        OutPacket p = OutPacket.create(SendOpcode.REACTOR_HIT);
+        p.writeInt(oid);
+        p.writeByte(state);
+        p.writePos(position);
+        p.writeByte(0);
+        p.writeShort(0);
+        p.writeByte(5);
+        return p;
+    }
+
+    private static OutPacket reactorDestroyed(int oid, int state, Point position) {
+        OutPacket p = OutPacket.create(SendOpcode.REACTOR_DESTROY);
+        p.writeInt(oid);
+        p.writeByte(state);
+        p.writePos(position);
         return p;
     }
 
@@ -91,6 +130,38 @@ class WorldStateTest {
         assertEquals(1, world.getItemDrops().size());
         feed(world, pickedUp(500, 2));
         assertTrue(world.getItemDrops().isEmpty(), "drops left: " + world.getItemDrops());
+    }
+
+    @Test
+    void itemDropsRetainTheirSourceAndWhetherAPlayerDroppedThem() {
+        WorldState world = new WorldState(1);
+        feed(world, drop(500, 4001101, 901, false));
+        feed(world, drop(501, 4001101, 2, true));
+
+        WorldState.ItemDrop monsterDrop = world.getItemDrops().stream()
+                .filter(d -> d.objectId() == 500).findFirst().orElseThrow();
+        WorldState.ItemDrop playerDrop = world.getItemDrops().stream()
+                .filter(d -> d.objectId() == 501).findFirst().orElseThrow();
+        assertEquals(901, monsterDrop.dropperObjectId());
+        assertTrue(!monsterDrop.playerDrop());
+        assertTrue(playerDrop.playerDrop());
+    }
+
+    @Test
+    void reactorsAreTrackedThroughSpawnHitDestroyAndMapChange() {
+        WorldState world = new WorldState(1);
+        feed(world, reactorSpawn(600, 9108000, 0, new Point(4, -690)));
+        assertEquals(0, world.getReactors().iterator().next().state());
+
+        feed(world, reactorHit(600, 1, new Point(4, -690)));
+        assertEquals(1, world.getReactors().iterator().next().state());
+
+        feed(world, reactorDestroyed(600, 1, new Point(4, -690)));
+        assertTrue(world.getReactors().isEmpty());
+
+        feed(world, reactorSpawn(601, 9108001, 0, new Point(182, -452)));
+        world.onMapChanged();
+        assertTrue(world.getReactors().isEmpty());
     }
 
     @Test

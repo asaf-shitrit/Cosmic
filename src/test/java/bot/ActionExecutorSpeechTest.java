@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Random;
+import java.awt.Point;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -96,6 +97,24 @@ class ActionExecutorSpeechTest {
         clock.advanceMs(1_000);
         executor.tick();
         verify(conn, times(2)).send(any());
+    }
+
+    @Test
+    void reactorHitMatchesTheServerHandlerLayout() throws Exception {
+        MapleConnection conn = mock(MapleConnection.class);
+        WorldState world = new WorldState(1);
+        world.setSelfPosition(new Point(123, 456));
+        ActionExecutor executor = new ActionExecutor(conn, world);
+
+        executor.execute(new Action.HitReactor(9876));
+
+        InPacket in = capture(conn);
+        assertEquals(RecvOpcode.DAMAGE_REACTOR.getValue(), in.readShort() & 0xFFFF);
+        assertEquals(9876, in.readInt());
+        assertEquals(123, in.readInt());
+        assertEquals(0, in.readShort());
+        assertEquals(0, in.readInt());
+        assertEquals(0, in.readInt());
     }
 
     /** One packet, read back exactly the way the server's InPacket would. */

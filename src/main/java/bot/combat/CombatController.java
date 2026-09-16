@@ -73,35 +73,33 @@ public final class CombatController {
         if (!canAct(self, owner, position) || self.getJob().isA(Job.MAGICIAN)) {
             return Optional.empty();
         }
-        boolean kpqCombat = kpqCombatMap(owner.getMapId());
         WorldState.MonsterSighting target = world.getMonsters().stream()
-                .filter(m -> m.objectId() == currentTarget && withinLeash(m, owner, kpqCombat))
+                .filter(m -> m.objectId() == currentTarget && withinLeash(m, owner, CombatScope.NEAR_OWNER))
                 .findFirst()
-                .orElseGet(() -> nearest(world, owner, kpqCombat));
+                .orElseGet(() -> nearest(world, owner, CombatScope.NEAR_OWNER));
         if (target == null) {
             currentTarget = -1;
             return Optional.empty();
         }
         currentTarget = target.objectId();
-        return Optional.of(attackTarget(world, position, target.objectId()));
+        return Optional.of(attackTarget(world, position, target.objectId(), CombatScope.NEAR_OWNER));
     }
 
     /**
-     * Attack a specific observed monster if it remains inside the owner leash. A Cleric companion
+     * Attacks one observed monster using the caller's explicit movement scope. A Cleric companion
      * doesn't: with a wand and a Cleric's STR its swing does 1 damage (seen live), and its magic
      * attacks aren't implemented, so it heals and buffs instead.
      */
-    public Action attackTarget(WorldState world, Point position, int monsterObjectId) {
+    public Action attackTarget(WorldState world, Point position, int monsterObjectId, CombatScope scope) {
         Character self = selfSupplier.get();
         Character owner = ownerSupplier.get();
         if (!canAct(self, owner, position) || self.getJob().isA(Job.MAGICIAN)) {
             return new Action.Idle();
         }
-        boolean kpqCombat = kpqCombatMap(owner.getMapId());
         WorldState.MonsterSighting mob = world.getMonsters().stream()
                 .filter(m -> m.objectId() == monsterObjectId)
                 .findFirst().orElse(null);
-        if (mob == null || !withinLeash(mob, owner, kpqCombat)) {
+        if (mob == null || !withinLeash(mob, owner, scope)) {
             return new Action.Idle();
         }
         if (position.distanceSq(mob.position()) > (long) MELEE_RANGE * MELEE_RANGE) {
@@ -186,17 +184,15 @@ public final class CombatController {
                 && self.getPartyId() >= 0 && self.getPartyId() == owner.getPartyId() && combatAllowed(owner);
     }
 
-    /**
-     * Farming KPQ's stage 1 and 5 needs the whole map, so the leash is lifted there. It only ever
-     * spans one map: this never moves a companion off the owner's map.
-     */
-    private static boolean withinLeash(WorldState.MonsterSighting mob, Character owner, boolean kpqCombat) {
-        return kpqCombat || mob.position().distanceSq(owner.getPosition()) <= (long) OWNER_LEASH * OWNER_LEASH;
+    /** Full-map scope is granted by an active PQ session; ordinary field combat stays owner-leashed. */
+    private static boolean withinLeash(WorldState.MonsterSighting mob, Character owner, CombatScope scope) {
+        return scope == CombatScope.FULL_MAP
+                || mob.position().distanceSq(owner.getPosition()) <= (long) OWNER_LEASH * OWNER_LEASH;
     }
 
-    private static WorldState.MonsterSighting nearest(WorldState world, Character owner, boolean kpqCombat) {
+    private static WorldState.MonsterSighting nearest(WorldState world, Character owner, CombatScope scope) {
         Point ownerPosition = owner.getPosition();
-        return world.getMonsters().stream().filter(m -> withinLeash(m, owner, kpqCombat))
+        return world.getMonsters().stream().filter(m -> withinLeash(m, owner, scope))
                 .min(Comparator.comparingDouble(m -> m.position().distanceSq(ownerPosition))).orElse(null);
     }
 
@@ -204,12 +200,7 @@ public final class CombatController {
         if (owner.getMap() == null || owner.getMap().isTown()) {
             return false;
         }
-        int map = owner.getMapId();
-        return map < 103000801 || map > 103000803; // KPQ stages 2-4 are positional, not combat areas.
-    }
-
-    private static boolean kpqCombatMap(int map) {
-        return map == 103000800 || map == 103000804 || map == 103000805;
+        return true;
     }
 
     private static boolean canCast(Character self, int id) {
