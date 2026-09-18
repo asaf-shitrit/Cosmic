@@ -39,6 +39,12 @@ public class Spectator {
         ChannelSession session = BotSession.loginAndEnterChannel(host, loginPort, user, pass);
         try (MapleConnection conn = session.connection()) {
             conn.setReadTimeoutMs(READ_TICK_MS);
+            // The world view decodes SPAWN_PLAYER for us, position and name included - the same
+            // decode the bots use - so these lines carry what a client was actually told about where
+            // a spawned object stands. That is the input verification/agents/check_placement.py reads
+            // to check observed positions against the map's own footholds. It is cleared per map by
+            // WorldState, so a spectator that changes maps logs everyone's spawn again.
+            WorldState world = new WorldState(session.charId());
             System.out.println("[..]   watching for other players entering/moving in this map");
 
             long deadline = System.currentTimeMillis() + budgetMs;
@@ -51,9 +57,9 @@ public class Spectator {
                     // returning it (see that method's javadoc), so it just falls through the checks
                     // below unmatched, same as any other opcode this class doesn't track.
                     if (opcode == SendOpcode.SPAWN_PLAYER.getValue()) {
-                        int charId = p.readInt();   // leading field of spawnPlayerMapObject; rest unparsed
-                        if (charId != session.charId()) {
-                            System.out.println(java.time.LocalTime.now() + " [see]   player " + charId + " is in this map");
+                        String seen = world.accept(opcode, p);
+                        if (seen != null) {
+                            System.out.println(java.time.LocalTime.now() + " [see]   " + seen);
                         }
                     } else if (opcode == SendOpcode.MOVE_PLAYER.getValue()) {
                         logMove(p, session.charId());
