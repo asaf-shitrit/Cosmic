@@ -71,8 +71,16 @@ public final class BotPartySupervisor {
 
     private static final long SUMMON_COOLDOWN_MS = 10_000;
     private static final long WATCHDOG_PERIOD_MS = 1000;
-    /** A bot not in the world by now is stuck in login; stop it. */
-    private static final long LOGIN_DEADLINE_MS = 60_000;
+    /**
+     * A bot not in the world by now is stuck in login; stop it. This also bounds how long a stuck bot
+     * can hold {@code SummonedBot.LOGIN_GATE} - a single JVM-wide gate, since every summoned bot logs
+     * in from 127.0.0.1 and the server's per-IP login-handoff slot can only hold one at a time. Until
+     * this deadline fires, no other owner anywhere on the server can start a new companion login, so
+     * this is kept well above a healthy login's actual duration (well under 5s: DB lookup, CREATE_CHAR,
+     * channel handoff) but far below the old 60s, which let one stuck bot silently stall the whole
+     * server's ability to summon for over a minute.
+     */
+    private static final long LOGIN_DEADLINE_MS = 15_000;
     /** After asking a bot to stop, how long before its socket is closed out from under it. */
     private static final long STOP_GRACE_MS = 5000;
     private static final long INVITE_RETRY_MS = 5000;

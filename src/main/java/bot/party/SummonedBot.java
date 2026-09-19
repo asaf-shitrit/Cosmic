@@ -52,9 +52,12 @@ final class SummonedBot implements Runnable {
      * slot, so one of them finds it empty and gets {@code c.disconnect(true, false)} on a client with
      * no player yet - which leaves the socket open and the character never loaded, so the bot just
      * waits for a SET_FIELD that never comes. Seen live twice with 3 simultaneous summons: 3 channel
-     * connects, 2 characters loaded. A stuck holder can't wedge the queue for long: the watchdog stops
-     * a bot that isn't in the world within its login deadline and closes its socket, which releases
-     * the gate in {@link #run}'s {@code finally}.
+     * connects, 2 characters loaded. This gate is JVM-wide, not per-owner, because the resource it
+     * protects (the server's one per-IP login slot) is shared by every owner's bots alike - scoping it
+     * per-owner would let two different owners' bots collide in exactly this way. A stuck holder can't
+     * wedge the queue for long: the watchdog (see {@code BotPartySupervisor.LOGIN_DEADLINE_MS}) stops a
+     * bot that isn't in the world within its login deadline and closes its socket, which releases the
+     * gate in {@link #run}'s {@code finally}.
      */
     private static final Semaphore LOGIN_GATE = new Semaphore(1, true);
 
