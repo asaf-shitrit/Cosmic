@@ -1,4 +1,4 @@
 @echo off
-@title Cosmic
-java -Xmx2048m -Dwz-path=wz -jar target\Cosmic.jar
+@title Galaxy
+java -Xmx2048m -Dwz-path=wz -jar target\Galaxy.jar
 pause

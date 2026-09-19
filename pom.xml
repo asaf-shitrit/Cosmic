@@ -2,14 +2,14 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>cosmic-maplestory</groupId>
-    <artifactId>Cosmic</artifactId>
+    <groupId>galaxy-maplestory</groupId>
+    <artifactId>Galaxy</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>Cosmic</name>
-    <description>Server emulator for Global MapleStory version 83</description>
-    <url>https://github.com/P0nk/Cosmic</url>
+    <name>Galaxy</name>
+    <description>Self-hosted MapleStory v83 world with AI players, built on the Cosmic server emulator</description>
+    <url>https://github.com/asaf-shitrit/Cosmic</url>
     <inceptionYear>2021</inceptionYear>
 
     <developers>

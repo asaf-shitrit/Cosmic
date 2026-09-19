@@ -2,7 +2,7 @@
 # Optimisation performed by wejrox
 
 #
-# Cosmic JAR creation stage
+# Galaxy JAR creation stage
 #
 FROM maven:3.9.6-amazoncorretto-21 AS jar
 
@@ -34,7 +34,7 @@ WORKDIR /opt/server
 # Copy the wizet files first since they're so big and won't change often.
 COPY wz ./wz
 # Copy the JAR we build earlier.
-COPY --from=jar /opt/cosmic/target/Cosmic.jar ./Server.jar
+COPY --from=jar /opt/cosmic/target/Galaxy.jar ./Server.jar
 # Scripts are sourced on server startup, so you can mount over them for quicker redeploy.
 COPY scripts ./scripts/
 # Config is read on server startup, so you can mount over it for quicker redeploy.

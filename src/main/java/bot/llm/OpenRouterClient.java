@@ -79,7 +79,7 @@ public final class OpenRouterClient implements LlmClient {
                 .timeout(TIMEOUT)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
-                .header("X-Title", "Cosmic v83 bots")
+                .header("X-Title", "Galaxy v83 bots")
                 .POST(HttpRequest.BodyPublishers.ofString(Json.write(body), StandardCharsets.UTF_8))
                 .build();
 
